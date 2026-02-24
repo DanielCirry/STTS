@@ -116,14 +116,25 @@ Plans:
 
 **Requirements:** RVC-01 to RVC-10
 
+**Plans:** 4 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Port RVC inference code + RVCPostProcessor wrapper class
+- [ ] 04-02-PLAN.md — Backend integration: TTSManager hook + engine.py WebSocket handlers
+- [ ] 04-03-PLAN.md — Frontend: RVC settings store + Voice Conversion settings UI
+- [ ] 04-04-PLAN.md — End-to-end wiring: frontend event handlers + Test Voice + verification
+
 **What to build:**
-- `python/ai/tts/rvc_postprocess.py` — RVC inference wrapper (ported from local RVC repo or rvc-python)
+- `python/ai/rvc/` — Ported RVC inference package (pipeline, RMVPE, synthesizer models)
+- `python/ai/tts/rvc_postprocess.py` — RVC inference wrapper with async interface
 - HuBERT feature extraction + RMVPE pitch extraction pipeline
 - Integration into `TTSManager.speak()` as optional post-processing step
-- Model file browser for .pth and .index files
-- Frontend: "Voice Conversion" section in TTS Settings with enable toggle, model selector, pitch slider, index rate slider
+- Model file scanner for .pth and .index files with folder browse
+- Frontend: "Voice Conversion" as separate top-level settings section with enable toggle, model selector, full quality control panel (pitch, index rate, filter radius, resample rate, volume envelope, protect consonants)
 - Model warm-loading on selection (not on first TTS call)
 - Explicit unload button (RVC adds ~1.5GB memory)
+- Base model (HuBERT + RMVPE) download with user confirmation dialog
+- "Test Voice" records 3 seconds from microphone, converts through RVC, plays back
 
 **Success criteria:**
 - [ ] Enable RVC → select .pth model → TTS output sounds like the selected voice
@@ -177,4 +188,4 @@ Plans:
 
 ---
 *Roadmap created: 2026-02-24*
-*Last updated: 2026-02-24 after Phase 3 planning (AI Provider Fallback Chain)*
+*Last updated: 2026-02-25 after Phase 4 planning (RVC Voice Conversion)*
