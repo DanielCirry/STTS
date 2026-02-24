@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-02-24)
 
 **Core value:** Real-time voice pipeline that just works — zero interruptions from rate limits, model failures, or missing dependencies.
-**Current focus:** Phase 3 complete — ready for Phase 4 (RVC Voice Conversion)
+**Current focus:** Phase 4 in progress — RVC Voice Conversion
 
 ## Current Milestone
 
@@ -18,14 +18,15 @@ See: `.planning/PROJECT.md` (updated 2026-02-24)
 | 1 | Stability Pass | COMPLETE (verified 2026-02-24, 7/7 must-haves, human testing pending) |
 | 2 | Translation Fallback Chain | COMPLETE |
 | 3 | AI Provider Fallback Chain | COMPLETE |
-| 4 | RVC Voice Conversion | NOT STARTED |
+| 4 | RVC Voice Conversion | IN PROGRESS (Plan 3/4 complete) |
 | 5 | Packaging & Distribution | NOT STARTED |
 
 ## Current Position
 
-**Phase:** 03-ai-provider-fallback-chain (COMPLETE)
-**Last completed plan:** 03-02 (Frontend AI Provider Integration)
-**Summary:** `.planning/phases/03-ai-provider-fallback-chain/03-02-SUMMARY.md`
+**Phase:** 04-rvc-voice-conversion (IN PROGRESS)
+**Current Plan:** 4 of 4
+**Last completed plan:** 04-03 (Frontend RVC Settings UI)
+**Summary:** `.planning/phases/04-rvc-voice-conversion/04-03-SUMMARY.md`
 
 ## Decisions Log
 
@@ -51,6 +52,10 @@ See: `.planning/PROJECT.md` (updated 2026-02-24)
 - **2026-02-24 (03-02):** activeAIProvider and aiOfflineMode are runtime state (not persisted) -- reset on reload, backend re-emits on next generate()
 - **2026-02-24 (03-02):** AI provider switch always shows toast (differs from translation); offline mode is StatusBar-only per CONTEXT.md locked decisions
 - **2026-02-24 (03-02):** Initial provider assignment (from=null, reason=initial) does not trigger toast
+- **2026-02-25 (04-03):** AudioLines icon for Voice Conversion settings nav (distinct from Volume2 for TTS)
+- **2026-02-25 (04-03):** Zustand persist version bumped to 3 with migration adding default rvc settings
+- **2026-02-25 (04-03):** camelCase-to-snake_case param mapping in handleParamChange for WebSocket backend compatibility
+- **2026-02-25 (04-03):** Resample Rate uses Select dropdown (discrete values) instead of slider
 
 ## Key Documents
 
@@ -79,4 +84,4 @@ See: `.planning/PROJECT.md` (updated 2026-02-24)
 - VRChat send-on-failure bug FIXED in 02-01 — untranslated text no longer sent when translation fails
 
 ---
-*Last updated: 2026-02-24 after Phase 3 Plan 02 (Frontend AI Provider Integration)*
+*Last updated: 2026-02-25 after Phase 4 Plan 03 (Frontend RVC Settings UI)*

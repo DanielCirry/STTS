@@ -34,11 +34,11 @@
 ### RVC Voice Conversion
 
 - [ ] **RVC-01**: RVC post-processor integrated into TTS pipeline (any TTS engine → RVC → output)
-- [ ] **RVC-02**: User can select .pth voice model file via file browser
-- [ ] **RVC-03**: User can select .index FAISS file (optional)
-- [ ] **RVC-04**: Pitch shift configurable (-12 to +12 semitones)
-- [ ] **RVC-05**: Index rate configurable (0.0 - 1.0)
-- [ ] **RVC-06**: Enable/disable RVC toggle in TTS settings
+- [x] **RVC-02**: User can select .pth voice model file via file browser
+- [x] **RVC-03**: User can select .index FAISS file (optional)
+- [x] **RVC-04**: Pitch shift configurable (-12 to +12 semitones)
+- [x] **RVC-05**: Index rate configurable (0.0 - 1.0)
+- [x] **RVC-06**: Enable/disable RVC toggle in TTS settings
 - [ ] **RVC-07**: RVC works on CPU (GPU optional for faster processing)
 - [ ] **RVC-08**: Pre-trained models (HuBERT, RMVPE) auto-download on first use
 - [ ] **RVC-09**: "Test Voice" button plays sample with RVC applied
@@ -101,11 +101,11 @@
 | AI-06 | Phase 3 | Complete |
 | AI-07 | Phase 3 | Complete |
 | RVC-01 | Phase 4 | Pending |
-| RVC-02 | Phase 4 | Pending |
-| RVC-03 | Phase 4 | Pending |
-| RVC-04 | Phase 4 | Pending |
-| RVC-05 | Phase 4 | Pending |
-| RVC-06 | Phase 4 | Pending |
+| RVC-02 | Phase 4 | Complete |
+| RVC-03 | Phase 4 | Complete |
+| RVC-04 | Phase 4 | Complete |
+| RVC-05 | Phase 4 | Complete |
+| RVC-06 | Phase 4 | Complete |
 | RVC-07 | Phase 4 | Pending |
 | RVC-08 | Phase 4 | Pending |
 | RVC-09 | Phase 4 | Pending |
