@@ -41,8 +41,16 @@ const PROVIDER_LABELS: Record<string, string> = {
   nllb: 'NLLB',
 }
 
+const AI_PROVIDER_LABELS: Record<string, string> = {
+  local: 'Local LLM',
+  groq: 'Groq',
+  google: 'Gemini',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+}
+
 export function StatusBar({ connected, audioLevel = 0, detectedLanguage, speakerCapturing, ttsEngine }: StatusBarProps) {
-  const { isListening, isProcessing, activeTranslationProvider } = useChatStore()
+  const { isListening, isProcessing, activeTranslationProvider, activeAIProvider, aiOfflineMode } = useChatStore()
   const settings = useSettingsStore()
   const errorCount = useNotificationStore((s) => s.errorCount)
 
@@ -133,6 +141,17 @@ export function StatusBar({ connected, audioLevel = 0, detectedLanguage, speaker
           <div className="h-3 w-px bg-border shrink-0" />
           <span className="shrink-0 text-muted-foreground text-xs">
             Trans: {PROVIDER_LABELS[activeTranslationProvider] || activeTranslationProvider}
+          </span>
+        </>
+      )}
+
+      {/* Active AI provider */}
+      {settings.ai.enabled && activeAIProvider && (
+        <>
+          <div className="h-3 w-px bg-border shrink-0" />
+          <span className="shrink-0 text-muted-foreground text-xs">
+            AI: {AI_PROVIDER_LABELS[activeAIProvider] || activeAIProvider}
+            {aiOfflineMode && ' (offline)'}
           </span>
         </>
       )}
