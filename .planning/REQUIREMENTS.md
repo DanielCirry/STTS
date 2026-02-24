@@ -23,13 +23,13 @@
 
 ### AI Provider Fallback
 
-- [ ] **AI-01**: Fallback chain: local LLM → Groq free → Gemini free → paid providers (OpenAI/Anthropic if keys configured)
-- [ ] **AI-02**: Rate limit detection per provider (429 for Groq/OpenAI, ResourceExhausted for Google, 529 for Anthropic)
-- [ ] **AI-03**: Seamless provider switching — conversation continues without interruption
-- [ ] **AI-04**: Shared conversation history maintained across provider switches
+- [x] **AI-01**: Fallback chain: local LLM → Groq free → Gemini free → paid providers (OpenAI/Anthropic if keys configured)
+- [x] **AI-02**: Rate limit detection per provider (429 for Groq/OpenAI, ResourceExhausted for Google, 529 for Anthropic)
+- [x] **AI-03**: Seamless provider switching — conversation continues without interruption
+- [x] **AI-04**: Shared conversation history maintained across provider switches
 - [ ] **AI-05**: User notification on provider switch (status bar pill showing active AI provider)
-- [ ] **AI-06**: 15-second timeout on all cloud AI calls to prevent hanging
-- [ ] **AI-07**: Local LLM works as ultimate fallback when no internet available
+- [x] **AI-06**: 15-second timeout on all cloud AI calls to prevent hanging
+- [x] **AI-07**: Local LLM works as ultimate fallback when no internet available
 
 ### RVC Voice Conversion
 
@@ -93,13 +93,13 @@
 | TRAN-03 | Phase 2 | Pending |
 | TRAN-04 | Phase 2 | Complete (02-02) |
 | TRAN-05 | Phase 2 | Complete (02-02) |
-| AI-01 | Phase 3 | Pending |
-| AI-02 | Phase 3 | Pending |
-| AI-03 | Phase 3 | Pending |
-| AI-04 | Phase 3 | Pending |
+| AI-01 | Phase 3 | Complete |
+| AI-02 | Phase 3 | Complete |
+| AI-03 | Phase 3 | Complete |
+| AI-04 | Phase 3 | Complete |
 | AI-05 | Phase 3 | Pending |
-| AI-06 | Phase 3 | Pending |
-| AI-07 | Phase 3 | Pending |
+| AI-06 | Phase 3 | Complete |
+| AI-07 | Phase 3 | Complete |
 | RVC-01 | Phase 4 | Pending |
 | RVC-02 | Phase 4 | Pending |
 | RVC-03 | Phase 4 | Pending |
