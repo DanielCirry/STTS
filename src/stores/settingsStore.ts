@@ -78,6 +78,20 @@ interface VROverlaySettings {
   followHead: boolean
 }
 
+export interface RVCSettings {
+  enabled: boolean
+  modelPath: string | null
+  indexPath: string | null
+  modelsDirectory: string
+  f0UpKey: number          // Pitch shift: -12 to +12 semitones
+  indexRate: number         // FAISS influence: 0.0 to 1.0
+  filterRadius: number     // Pitch smoothing: 1 to 7
+  rmsMixRate: number       // Loudness matching: 0.0 to 1.0
+  protect: number          // Consonant protection: 0.0 to 0.5
+  resampleSr: number       // Resample rate: 0 = disabled
+  volumeEnvelope: number   // Volume envelope mix: 0.0 to 1.0
+}
+
 interface VRChatSettings {
   oscEnabled: boolean
   oscIP: string
@@ -91,6 +105,7 @@ export interface Settings {
   translation: TranslationSettings
   tts: TTSSettings
   ai: AIAssistantSettings
+  rvc: RVCSettings
   vrOverlay: VROverlaySettings
   vrchat: VRChatSettings
   firstRunComplete: boolean
@@ -102,6 +117,7 @@ interface SettingsStore extends Settings {
   updateTranslation: (settings: Partial<TranslationSettings>) => void
   updateTTS: (settings: Partial<TTSSettings>) => void
   updateAI: (settings: Partial<AIAssistantSettings>) => void
+  updateRVC: (settings: Partial<RVCSettings>) => void
   updateVROverlay: (settings: Partial<VROverlaySettings>) => void
   updateVRChat: (settings: Partial<VRChatSettings>) => void
   addLanguagePair: (sourceLanguage: string, targetLanguage: string) => void
@@ -163,6 +179,19 @@ const defaultSettings: Settings = {
       groq: 'llama-3.1-8b-instant',
     },
   },
+  rvc: {
+    enabled: false,
+    modelPath: null,
+    indexPath: null,
+    modelsDirectory: 'models/rvc/voices',
+    f0UpKey: 0,
+    indexRate: 0.75,
+    filterRadius: 3,
+    rmsMixRate: 0.25,
+    protect: 0.33,
+    resampleSr: 0,
+    volumeEnvelope: 0.0,
+  },
   vrOverlay: {
     enabled: false,
     showIncomingText: true,
@@ -203,6 +232,8 @@ export const useSettingsStore = create<SettingsStore>()(
         set((state) => ({ tts: { ...state.tts, ...settings } })),
       updateAI: (settings) =>
         set((state) => ({ ai: { ...state.ai, ...settings } })),
+      updateRVC: (settings) =>
+        set((state) => ({ rvc: { ...state.rvc, ...settings } })),
       updateVROverlay: (settings) =>
         set((state) => ({ vrOverlay: { ...state.vrOverlay, ...settings } })),
       updateVRChat: (settings) =>
@@ -288,9 +319,16 @@ export const useSettingsStore = create<SettingsStore>()(
           }
         }
 
+        // v2 -> v3: Add RVC settings for users upgrading from older versions
+        if (version < 3) {
+          if (!state?.rvc) {
+            state.rvc = defaultSettings.rvc
+          }
+        }
+
         return state
       },
-      version: 2,
+      version: 3,
     }
   )
 )
