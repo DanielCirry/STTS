@@ -24,9 +24,9 @@
 **Plans:** 3 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Python backend fixes: freeze_support + translation error handling
-- [ ] 01-02-PLAN.md — Frontend notification system + exponential backoff reconnection
-- [ ] 01-03-PLAN.md — Error UI wiring: model error dialog, status bar badge, control disabling, E2E verification
+- [x] 01-01-PLAN.md — Python backend fixes: freeze_support + translation error handling
+- [x] 01-02-PLAN.md — Frontend notification system + exponential backoff reconnection
+- [x] 01-03-PLAN.md — Error UI wiring: model error dialog, status bar badge, control disabling, E2E verification
 
 **What to build:**
 - Manual end-to-end test of: mic → STT → translate → TTS → audio output → VRChat OSC
@@ -37,10 +37,10 @@ Plans:
 - Fix `soundcard` missing from PyInstaller builds (from packaging research)
 
 **Success criteria:**
-- [ ] Speak in English → see transcription → see Japanese translation → hear TTS → see VRChat chatbox
-- [ ] Kill backend → frontend shows disconnection → backend restarts → frontend reconnects automatically
-- [ ] Translation provider fails → error shown to user → fallback works → no crash
-- [ ] Model load fails → error message shown → user can retry or skip
+- [ ] Speak in English → see transcription → see Japanese translation → hear TTS → see VRChat chatbox *(human test pending)*
+- [x] Kill backend → frontend shows disconnection → backend restarts → frontend reconnects automatically *(code verified)*
+- [x] Translation provider fails → error shown to user → fallback works → no crash *(code verified)*
+- [x] Model load fails → error message shown → user can retry or skip *(code verified)*
 
 **Dependencies:** None (first phase)
 
@@ -51,6 +51,12 @@ Plans:
 **Goal:** Translation works for free without API keys, with paid APIs as optional upgrade, and local NLLB as ultimate fallback.
 
 **Requirements:** TRAN-01, TRAN-02, TRAN-03, TRAN-04, TRAN-05
+
+**Plans:** 2 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Python backend: FreeTranslationManager + engine fallback chain + VRChat fix
+- [ ] 02-02-PLAN.md — Frontend: provider type/stores, event handling, StatusBar pill, settings UI
 
 **What to build:**
 - `FreeTranslationManager` class (MyMemory → LibreTranslate → Lingva) matching existing `CloudTranslationManager` pattern
@@ -165,4 +171,4 @@ Plans:
 
 ---
 *Roadmap created: 2026-02-24*
-*Last updated: 2026-02-24 after Phase 1 planning*
+*Last updated: 2026-02-24 after Phase 2 planning*
