@@ -83,6 +83,12 @@ Plans:
 
 **Requirements:** AI-01, AI-02, AI-03, AI-04, AI-05, AI-06, AI-07
 
+**Plans:** 2 plans
+
+Plans:
+- [ ] 03-01-PLAN.md — Python backend: FallbackAIManager with provider health tracking, fallback chain, engine.py wiring
+- [ ] 03-02-PLAN.md — Frontend: chatStore AI state, useBackend event handlers, StatusBar AI provider pill
+
 **What to build:**
 - `FallbackAIManager` class with provider health tracking and priority chain
 - Rate limit detection per provider (429/ResourceExhausted/529 error types)
@@ -171,4 +177,4 @@ Plans:
 
 ---
 *Roadmap created: 2026-02-24*
-*Last updated: 2026-02-24 after Phase 2 Plan 02 (Frontend Translation Provider Integration)*
+*Last updated: 2026-02-24 after Phase 3 planning (AI Provider Fallback Chain)*
