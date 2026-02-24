@@ -12,6 +12,14 @@ const PROVIDER_LABELS: Record<string, string> = {
   nllb: 'NLLB (Local)',
 }
 
+const AI_PROVIDER_LABELS: Record<string, string> = {
+  local: 'Local LLM',
+  groq: 'Groq',
+  google: 'Gemini',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+}
+
 // Module-level singleton WebSocket to prevent React StrictMode double-connections
 let globalWs: WebSocket | null = null
 let globalConnecting = false
@@ -172,6 +180,43 @@ function handleGlobalMessage(message: BackendMessage) {
           'error'
         )
       }
+      break
+    }
+
+    case 'ai_provider_switched': {
+      const to = payload.to as string
+      const from = payload.from as string | null
+      const reason = payload.reason as string
+
+      useChatStore.getState().setActiveAIProvider(to)
+
+      // Always toast on ANY provider switch (LOCKED DECISION -- differs from translation which is silent for minor switches)
+      // Only toast when there was a previous provider (not initial assignment)
+      if (from !== null && reason !== 'initial') {
+        const toLabel = AI_PROVIDER_LABELS[to] || to
+        useNotificationStore.getState().addToast(
+          `AI switched to ${toLabel} (${reason})`,
+          'warning'
+        )
+      }
+      break
+    }
+
+    case 'ai_offline_mode': {
+      // StatusBar indicator only -- NO toast (LOCKED DECISION)
+      useChatStore.getState().setAIOfflineMode(true)
+      break
+    }
+
+    case 'ai_online_restored': {
+      const provider = payload.provider as string
+      useChatStore.getState().setAIOfflineMode(false)
+      useChatStore.getState().setActiveAIProvider(provider)
+      const providerLabel = AI_PROVIDER_LABELS[provider] || provider
+      useNotificationStore.getState().addToast(
+        `AI restored via ${providerLabel}`,
+        'warning'
+      )
       break
     }
 
@@ -432,7 +477,8 @@ export function useBackend() {
         // Log unknown messages only if they're not handled globally
         if (!['transcript_partial', 'transcript_final', 'translation_complete', 'translation_failed',
               'translation_provider_switched',
-              'ai_response', 'listening_started', 'listening_stopped',
+              'ai_response', 'ai_provider_switched', 'ai_offline_mode', 'ai_online_restored',
+              'listening_started', 'listening_stopped',
               'model_loading', 'model_loaded', 'model_error', 'model_download_progress',
               'error', 'local_models', 'models_directory', 'models_directory_set',
               'settings_updated', 'voicevox_connection_result', 'voicevox_voices',

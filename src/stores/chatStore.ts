@@ -21,6 +21,8 @@ interface ChatStore {
   showEmojiPicker: boolean
   detectedLanguage: string | null
   activeTranslationProvider: string | null
+  activeAIProvider: string | null
+  aiOfflineMode: boolean
   addMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => void
   updateMessageTranslation: (originalText: string, translatedText: string) => void
   clearMessages: () => void
@@ -32,6 +34,8 @@ interface ChatStore {
   toggleEmojiPicker: () => void
   setDetectedLanguage: (lang: string | null) => void
   setActiveTranslationProvider: (provider: string | null) => void
+  setActiveAIProvider: (provider: string | null) => void
+  setAIOfflineMode: (offline: boolean) => void
 }
 
 export const useChatStore = create<ChatStore>((set) => ({
@@ -43,6 +47,8 @@ export const useChatStore = create<ChatStore>((set) => ({
   showEmojiPicker: false,
   detectedLanguage: null,
   activeTranslationProvider: null,
+  activeAIProvider: null,
+  aiOfflineMode: false,
   addMessage: (message) =>
     set((state) => ({
       messages: [
@@ -71,4 +77,6 @@ export const useChatStore = create<ChatStore>((set) => ({
   toggleEmojiPicker: () => set((state) => ({ showEmojiPicker: !state.showEmojiPicker })),
   setDetectedLanguage: (lang) => set({ detectedLanguage: lang }),
   setActiveTranslationProvider: (provider) => set({ activeTranslationProvider: provider }),
+  setActiveAIProvider: (provider) => set({ activeAIProvider: provider }),
+  setAIOfflineMode: (offline) => set({ aiOfflineMode: offline }),
 }))
