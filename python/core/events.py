@@ -36,6 +36,9 @@ class EventType(str, Enum):
 
     # AI
     AI_RESPONSE = 'ai_response'
+    AI_PROVIDER_SWITCHED = 'ai_provider_switched'
+    AI_OFFLINE_MODE = 'ai_offline_mode'
+    AI_ONLINE_RESTORED = 'ai_online_restored'
 
     # Models
     MODEL_LOADING = 'model_loading'

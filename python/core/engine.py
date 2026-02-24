@@ -17,6 +17,7 @@ from ai.stt import SpeechToText
 from ai.translator import Translator
 from ai.tts import TTSManager
 from ai.assistant import AIAssistantManager, AssistantConfig
+from ai.assistant.fallback import FallbackAIManager
 from ai.translator_cloud import CloudTranslationManager
 from ai.translator_free import FreeTranslationManager
 from integrations.vrchat_osc import VRChatOSC
@@ -116,6 +117,7 @@ class STTSEngine:
         self._active_translation_provider: Optional[str] = None
         self._tts: Optional[TTSManager] = None
         self._ai_assistant: Optional[AIAssistantManager] = None
+        self._fallback_manager: Optional[FallbackAIManager] = None
         self._vrchat: Optional[VRChatOSC] = None
         self._vr_overlay: Optional[VROverlay] = None
         self._speaker_capture: Optional[SpeakerCapture] = None
@@ -353,6 +355,12 @@ class STTSEngine:
         self._ai_assistant.on_response = self._on_ai_response
         self._ai_assistant.on_error = self._on_ai_error
 
+        # Initialize FallbackAIManager (wraps AIAssistantManager)
+        self._fallback_manager = FallbackAIManager(
+            self._ai_assistant,
+            notify_callback=self._on_ai_provider_event
+        )
+
         # Apply AI settings
         ai_settings = self.settings.get('ai', {})
         if ai_settings.get('keyword'):
@@ -504,6 +512,16 @@ class STTSEngine:
                 self._loop
             )
 
+    async def _on_ai_provider_event(self, event_type: str, data: dict):
+        """Bridge FallbackAIManager events to WebSocket broadcast."""
+        event_map = {
+            'ai_provider_switched': EventType.AI_PROVIDER_SWITCHED,
+            'ai_offline_mode': EventType.AI_OFFLINE_MODE,
+            'ai_online_restored': EventType.AI_ONLINE_RESTORED,
+        }
+        if event_type in event_map:
+            await self.broadcast(create_event(event_map[event_type], data))
+
     def _on_transcript(self, text: str, detected_language: Optional[str] = None):
         """Handle transcription results."""
         logger.info(f"[stt-callback] _on_transcript called: '{text[:100]}' lang={detected_language} (loop={self._loop is not None})")
@@ -619,8 +637,16 @@ class STTSEngine:
                 if query:
                     logger.info(f"AI keyword detected, query: {query}")
                     try:
-                        # Generate AI response (will trigger callbacks)
-                        await self._ai_assistant.generate(query)
+                        response = await self._fallback_manager.generate(query)
+                        if response.model != 'fallback':
+                            await self._handle_ai_response(response)
+                        else:
+                            # AI unavailable — show in chat only, NOT TTS/VRChat
+                            await self.broadcast(create_event(EventType.AI_RESPONSE, {
+                                'response': response.content,
+                                'model': 'fallback',
+                                'truncated': False,
+                            }))
                         # Don't send the keyword-containing text to VRChat
                         return
                     except Exception as e:
@@ -716,8 +742,16 @@ class STTSEngine:
                 if query:
                     logger.info(f"AI keyword detected, query: {query}")
                     try:
-                        # Generate AI response (will trigger callbacks)
-                        await self._ai_assistant.generate(query)
+                        response = await self._fallback_manager.generate(query)
+                        if response.model != 'fallback':
+                            await self._handle_ai_response(response)
+                        else:
+                            # AI unavailable — show in chat only, NOT TTS/VRChat
+                            await self.broadcast(create_event(EventType.AI_RESPONSE, {
+                                'response': response.content,
+                                'model': 'fallback',
+                                'truncated': False,
+                            }))
                         # Don't send the keyword-containing text to VRChat
                         return
                     except Exception as e:
@@ -890,7 +924,8 @@ class STTSEngine:
                 'available': self._ai_assistant is not None,
                 'provider': self._ai_assistant.get_current_provider() if self._ai_assistant else None,
                 'providers': self._ai_assistant.get_available_providers() if self._ai_assistant else [],
-                'keyword': self.settings.get('ai', {}).get('keyword', 'jarvis')
+                'keyword': self.settings.get('ai', {}).get('keyword', 'jarvis'),
+                'fallback_provider': self._fallback_manager.get_active_provider() if self._fallback_manager else None,
             },
             'vrchat': {
                 'connected': self._vrchat.is_connected if self._vrchat else False,
@@ -1483,7 +1518,7 @@ class STTSEngine:
             return "AI assistant not available"
 
         try:
-            response = await self._ai_assistant.generate(query)
+            response = await self._fallback_manager.generate(query)
             return response.content
 
         except Exception as e:
@@ -1650,7 +1685,9 @@ class STTSEngine:
 
     def clear_ai_conversation(self):
         """Clear AI conversation history."""
-        if self._ai_assistant:
+        if self._fallback_manager:
+            self._fallback_manager.clear_conversation()
+        elif self._ai_assistant:
             self._ai_assistant.clear_conversation()
 
     # VR Overlay methods
