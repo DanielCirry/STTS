@@ -18,8 +18,8 @@
 - [x] **TRAN-01**: Free translation APIs integrated (MyMemory primary, LibreTranslate secondary, Lingva tertiary)
 - [x] **TRAN-02**: Automatic fallback chain: free cloud → paid APIs (DeepL/Google if keys configured) → local NLLB
 - [x] **TRAN-03**: Rate limit detection and seamless provider switching without user action
-- [ ] **TRAN-04**: User notification when provider switches (subtle status bar indicator, not interruptive)
-- [ ] **TRAN-05**: Translation provider status visible in StatusBar (which provider is active)
+- [x] **TRAN-04**: User notification when provider switches (subtle status bar indicator, not interruptive)
+- [x] **TRAN-05**: Translation provider status visible in StatusBar (which provider is active)
 
 ### AI Provider Fallback
 
@@ -91,8 +91,8 @@
 | TRAN-01 | Phase 2 | Pending |
 | TRAN-02 | Phase 2 | Pending |
 | TRAN-03 | Phase 2 | Pending |
-| TRAN-04 | Phase 2 | Pending |
-| TRAN-05 | Phase 2 | Pending |
+| TRAN-04 | Phase 2 | Complete (02-02) |
+| TRAN-05 | Phase 2 | Complete (02-02) |
 | AI-01 | Phase 3 | Pending |
 | AI-02 | Phase 3 | Pending |
 | AI-03 | Phase 3 | Pending |
@@ -126,4 +126,4 @@
 
 ---
 *Requirements defined: 2026-02-24*
-*Last updated: 2026-02-24 after initial definition*
+*Last updated: 2026-02-24 after Phase 2 Plan 02 (TRAN-04, TRAN-05 complete)*
