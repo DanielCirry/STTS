@@ -86,8 +86,8 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 03-01-PLAN.md — Python backend: FallbackAIManager with provider health tracking, fallback chain, engine.py wiring
-- [ ] 03-02-PLAN.md — Frontend: chatStore AI state, useBackend event handlers, StatusBar AI provider pill
+- [x] 03-01-PLAN.md — Python backend: FallbackAIManager with provider health tracking, fallback chain, engine.py wiring
+- [x] 03-02-PLAN.md — Frontend: chatStore AI state, useBackend event handlers, StatusBar AI provider pill
 
 **What to build:**
 - `FallbackAIManager` class with provider health tracking and priority chain

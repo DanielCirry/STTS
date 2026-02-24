@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-02-24)
 
 **Core value:** Real-time voice pipeline that just works — zero interruptions from rate limits, model failures, or missing dependencies.
-**Current focus:** Phase 3 — AI Provider Fallback Chain
+**Current focus:** Phase 3 complete — ready for Phase 4 (RVC Voice Conversion)
 
 ## Current Milestone
 
@@ -17,15 +17,15 @@ See: `.planning/PROJECT.md` (updated 2026-02-24)
 |-------|------|--------|
 | 1 | Stability Pass | COMPLETE (verified 2026-02-24, 7/7 must-haves, human testing pending) |
 | 2 | Translation Fallback Chain | COMPLETE |
-| 3 | AI Provider Fallback Chain | IN PROGRESS (03-01 complete) |
+| 3 | AI Provider Fallback Chain | COMPLETE |
 | 4 | RVC Voice Conversion | NOT STARTED |
 | 5 | Packaging & Distribution | NOT STARTED |
 
 ## Current Position
 
-**Phase:** 03-ai-provider-fallback-chain
-**Last completed plan:** 03-01 (AI Provider Fallback Chain Backend)
-**Summary:** `.planning/phases/03-ai-provider-fallback-chain/03-01-SUMMARY.md`
+**Phase:** 03-ai-provider-fallback-chain (COMPLETE)
+**Last completed plan:** 03-02 (Frontend AI Provider Integration)
+**Summary:** `.planning/phases/03-ai-provider-fallback-chain/03-02-SUMMARY.md`
 
 ## Decisions Log
 
@@ -48,6 +48,9 @@ See: `.planning/PROJECT.md` (updated 2026-02-24)
 - **2026-02-24 (03-01):** Soft-failure AssistantResponse(model='fallback') shown in chat only (not TTS/VRChat)
 - **2026-02-24 (03-01):** Application errors re-raised from fallback; only rate limits/timeouts/network errors trigger fallback
 - **2026-02-24 (03-01):** Health states persist across conversation clears (only _shared_conversation is reset)
+- **2026-02-24 (03-02):** activeAIProvider and aiOfflineMode are runtime state (not persisted) -- reset on reload, backend re-emits on next generate()
+- **2026-02-24 (03-02):** AI provider switch always shows toast (differs from translation); offline mode is StatusBar-only per CONTEXT.md locked decisions
+- **2026-02-24 (03-02):** Initial provider assignment (from=null, reason=initial) does not trigger toast
 
 ## Key Documents
 
@@ -76,4 +79,4 @@ See: `.planning/PROJECT.md` (updated 2026-02-24)
 - VRChat send-on-failure bug FIXED in 02-01 — untranslated text no longer sent when translation fails
 
 ---
-*Last updated: 2026-02-24 after Phase 3 Plan 01 (AI Provider Fallback Chain Backend)*
+*Last updated: 2026-02-24 after Phase 3 Plan 02 (Frontend AI Provider Integration)*
