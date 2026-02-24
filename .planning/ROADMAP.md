@@ -55,8 +55,8 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — Python backend: FreeTranslationManager + engine fallback chain + VRChat fix
-- [ ] 02-02-PLAN.md — Frontend: provider type/stores, event handling, StatusBar pill, settings UI
+- [x] 02-01-PLAN.md — Python backend: FreeTranslationManager + engine fallback chain + VRChat fix
+- [x] 02-02-PLAN.md — Frontend: provider type/stores, event handling, StatusBar pill, settings UI
 
 **What to build:**
 - `FreeTranslationManager` class (MyMemory → LibreTranslate → Lingva) matching existing `CloudTranslationManager` pattern
@@ -171,4 +171,4 @@ Plans:
 
 ---
 *Roadmap created: 2026-02-24*
-*Last updated: 2026-02-24 after Phase 2 planning*
+*Last updated: 2026-02-24 after Phase 2 Plan 02 (Frontend Translation Provider Integration)*
