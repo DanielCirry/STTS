@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { ArrowLeft, Cpu, Volume2, Bot, Monitor, Headphones, Key, Languages, Check, Loader2, Play, Square, Wifi, WifiOff, ExternalLink, Mic, MicOff, RefreshCw, Activity, AlertCircle, Eye, EyeOff, RotateCcw, Move, Palette, Trash2 } from 'lucide-react'
+import { ArrowLeft, Cpu, Volume2, Bot, Monitor, Headphones, Key, Languages, Check, Loader2, Play, Square, Wifi, WifiOff, ExternalLink, Mic, MicOff, RefreshCw, Activity, AlertCircle, Eye, EyeOff, RotateCcw, Move, Palette, Trash2, AudioLines } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Select } from '@/components/ui/select'
@@ -8,7 +8,7 @@ import { useSettingsStore, type ComputeDevice } from '@/stores'
 import { useModelStore } from '@/stores/modelStore'
 import { useBackend } from '@/hooks/useBackend'
 
-type SettingsPage = 'main' | 'models' | 'translation' | 'tts' | 'ai' | 'overlay' | 'audio' | 'credentials'
+type SettingsPage = 'main' | 'models' | 'translation' | 'tts' | 'ai' | 'voiceConversion' | 'overlay' | 'audio' | 'credentials'
 
 interface SettingsViewProps {
   onBack: () => void
@@ -19,6 +19,7 @@ const settingsPages = [
   { id: 'translation' as const, label: 'Translation', icon: Languages },
   { id: 'tts' as const, label: 'Text-to-Speech', icon: Volume2 },
   { id: 'ai' as const, label: 'AI Assistant', icon: Bot },
+  { id: 'voiceConversion' as const, label: 'Voice Conversion', icon: AudioLines },
   { id: 'overlay' as const, label: 'VR Overlay', icon: Monitor },
   { id: 'audio' as const, label: 'Audio Devices', icon: Headphones },
   { id: 'credentials' as const, label: 'API Credentials', icon: Key },
@@ -67,6 +68,8 @@ export function SettingsView({ onBack }: SettingsViewProps) {
         return <TTSSettings />
       case 'ai':
         return <AISettings />
+      case 'voiceConversion':
+        return <VoiceConversionSettings />
       case 'overlay':
         return <OverlaySettings />
       case 'audio':
@@ -2469,6 +2472,406 @@ function CredentialsSettings() {
           <li>Keys are only sent to their respective APIs</li>
           <li>For maximum security, use environment variables instead</li>
           <li>You can also set keys via GROQ_API_KEY, OPENAI_API_KEY, DEEPL_API_KEY, etc.</li>
+        </ul>
+      </div>
+    </div>
+  )
+}
+
+const RESAMPLE_RATE_OPTIONS = [
+  { value: '0', label: 'Disabled (No Resample)' },
+  { value: '16000', label: '16000 Hz' },
+  { value: '22050', label: '22050 Hz' },
+  { value: '24000', label: '24000 Hz' },
+  { value: '32000', label: '32000 Hz' },
+  { value: '40000', label: '40000 Hz' },
+  { value: '44100', label: '44100 Hz' },
+  { value: '48000', label: '48000 Hz' },
+]
+
+function VoiceConversionSettings() {
+  const settings = useSettingsStore()
+  const { sendMessage, lastMessage } = useBackend()
+
+  // Local state for runtime RVC data (not persisted)
+  const [availableModels, setAvailableModels] = useState<Array<{ name: string; path: string; index_path: string | null; size_mb: number }>>([])
+  const [isModelLoaded, setIsModelLoaded] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+  const [loadingStage, setLoadingStage] = useState('')
+  const [loadingProgress, setLoadingProgress] = useState(0)
+  const [memoryUsageMb, setMemoryUsageMb] = useState(0)
+  const [modelName, setModelName] = useState<string | null>(null)
+
+  // Request model list and status on mount
+  useEffect(() => {
+    sendMessage({ type: 'rvc_scan_models' })
+    sendMessage({ type: 'rvc_get_status' })
+  }, [sendMessage])
+
+  // Handle backend messages for RVC
+  useEffect(() => {
+    if (!lastMessage) return
+    switch (lastMessage.type) {
+      case 'rvc_models_list': {
+        const payload = lastMessage.payload as { models?: Array<{ name: string; path: string; model_path?: string; index_path: string | null; size_mb: number }> }
+        if (payload.models) {
+          setAvailableModels(payload.models.map(m => ({
+            name: m.name,
+            path: m.model_path || m.path,
+            index_path: m.index_path || null,
+            size_mb: m.size_mb,
+          })))
+        }
+        break
+      }
+      case 'rvc_model_loaded': {
+        const payload = lastMessage.payload as { model_path?: string; memory_mb?: number }
+        setIsLoading(false)
+        setIsModelLoaded(true)
+        setLoadingProgress(100)
+        setLoadingStage('')
+        if (payload.memory_mb) setMemoryUsageMb(payload.memory_mb)
+        // Extract model name from path
+        if (payload.model_path) {
+          const parts = payload.model_path.replace(/\\/g, '/').split('/')
+          const filename = parts[parts.length - 1]
+          setModelName(filename.replace(/\.pth$/i, ''))
+        }
+        break
+      }
+      case 'rvc_model_error': {
+        setIsLoading(false)
+        setLoadingStage('')
+        setLoadingProgress(0)
+        break
+      }
+      case 'rvc_loading': {
+        const payload = lastMessage.payload as { stage?: string; progress?: number }
+        setIsLoading(true)
+        if (payload.stage) setLoadingStage(payload.stage)
+        if (payload.progress !== undefined) setLoadingProgress(payload.progress)
+        break
+      }
+      case 'rvc_unloaded': {
+        setIsModelLoaded(false)
+        setMemoryUsageMb(0)
+        setModelName(null)
+        settings.updateRVC({ modelPath: null, indexPath: null })
+        break
+      }
+      case 'rvc_status': {
+        const payload = lastMessage.payload as {
+          enabled?: boolean; model_loaded?: boolean; model_name?: string; memory_mb?: number
+        }
+        if (payload.model_loaded !== undefined) setIsModelLoaded(payload.model_loaded)
+        if (payload.model_name) setModelName(payload.model_name)
+        if (payload.memory_mb) setMemoryUsageMb(payload.memory_mb)
+        break
+      }
+    }
+  }, [lastMessage, settings])
+
+  const handleEnableToggle = (checked: boolean) => {
+    settings.updateRVC({ enabled: checked })
+    sendMessage({ type: 'rvc_enable', payload: { enabled: checked } })
+    // Disabling RVC also unloads the model (per CONTEXT.md)
+    if (!checked && isModelLoaded) {
+      sendMessage({ type: 'rvc_unload' })
+      setIsModelLoaded(false)
+      setMemoryUsageMb(0)
+      setModelName(null)
+    }
+  }
+
+  const handleModelSelect = (value: string) => {
+    if (value === '__browse__') {
+      sendMessage({ type: 'rvc_browse_model' })
+      return
+    }
+    const model = availableModels.find(m => m.path === value)
+    if (model) {
+      settings.updateRVC({ modelPath: model.path, indexPath: model.index_path })
+      setIsLoading(true)
+      setLoadingStage('Loading voice model...')
+      setLoadingProgress(0)
+      sendMessage({ type: 'rvc_load_model', payload: { model_path: model.path, index_path: model.index_path } })
+    }
+  }
+
+  const handleUnloadModel = () => {
+    sendMessage({ type: 'rvc_unload' })
+    setIsModelLoaded(false)
+    setMemoryUsageMb(0)
+    setModelName(null)
+    settings.updateRVC({ modelPath: null, indexPath: null })
+  }
+
+  const handleParamChange = (param: string, value: number) => {
+    settings.updateRVC({ [param]: value } as Partial<typeof settings.rvc>)
+    // Map camelCase to snake_case for backend
+    const paramMap: Record<string, string> = {
+      f0UpKey: 'f0_up_key',
+      indexRate: 'index_rate',
+      filterRadius: 'filter_radius',
+      rmsMixRate: 'rms_mix_rate',
+      protect: 'protect',
+      resampleSr: 'resample_sr',
+      volumeEnvelope: 'volume_envelope',
+    }
+    const backendParam = paramMap[param] || param
+    sendMessage({ type: 'rvc_set_params', payload: { [backendParam]: value } })
+  }
+
+  const handleTestVoice = () => {
+    sendMessage({ type: 'rvc_test_voice' })
+  }
+
+  const modelOptions = [
+    ...availableModels.map(m => ({
+      value: m.path,
+      label: `${m.name} (${m.size_mb.toFixed(1)} MB)`,
+    })),
+    { value: '__browse__', label: 'Browse...' },
+  ]
+
+  return (
+    <div className="p-4 space-y-6">
+      <div>
+        <h3 className="text-lg font-medium mb-4">Voice Conversion</h3>
+        <p className="text-sm text-muted-foreground mb-4">
+          Apply RVC voice models to transform TTS output into a different voice. Load a .pth voice model and adjust conversion parameters.
+        </p>
+      </div>
+
+      {/* Enable/Disable Toggle */}
+      <div className="flex items-center justify-between">
+        <div className="space-y-0.5">
+          <Label>Enable Voice Conversion</Label>
+          <p className="text-xs text-muted-foreground">
+            Post-process TTS audio through the selected voice model
+          </p>
+        </div>
+        <Switch
+          checked={settings.rvc.enabled}
+          onCheckedChange={handleEnableToggle}
+        />
+      </div>
+
+      {/* Model Selector */}
+      <div className="space-y-2">
+        <Label>Voice Model</Label>
+        {availableModels.length > 0 || isModelLoaded ? (
+          <Select
+            value={settings.rvc.modelPath || ''}
+            onValueChange={handleModelSelect}
+            options={modelOptions}
+            placeholder="Select a voice model..."
+          />
+        ) : (
+          <div>
+            <Select
+              value=""
+              onValueChange={handleModelSelect}
+              options={[{ value: '__browse__', label: 'Browse...' }]}
+              placeholder="No models found"
+            />
+          </div>
+        )}
+        {/* Empty state message */}
+        {!isModelLoaded && !isLoading && (
+          <p className="text-sm text-muted-foreground">
+            Select a voice model to enable voice conversion
+          </p>
+        )}
+        {/* Loading state */}
+        {isLoading && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-xs text-primary">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              <span>{loadingStage || 'Loading model...'}</span>
+            </div>
+            {loadingProgress > 0 && loadingProgress < 100 && (
+              <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full transition-all duration-300"
+                  style={{ width: `${loadingProgress}%` }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Memory Indicator + Unload — only when model loaded */}
+      {isModelLoaded && (
+        <div className="flex items-center justify-between p-3 rounded-lg bg-secondary/30">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-green-400" />
+            <span className="text-sm text-muted-foreground">
+              RVC: {modelName || 'Model loaded'}{memoryUsageMb > 0 ? ` — ${memoryUsageMb} MB` : ''}
+            </span>
+          </div>
+          <Button variant="ghost" size="sm" onClick={handleUnloadModel}>
+            Unload Model
+          </Button>
+        </div>
+      )}
+
+      {/* Quality Control Sliders */}
+      <div className={`space-y-4 ${!isModelLoaded ? 'opacity-50 pointer-events-none' : ''}`}>
+        <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Quality Controls</h4>
+
+        {/* Pitch Shift */}
+        <div className="space-y-2">
+          <Label>Pitch Shift: {settings.rvc.f0UpKey} semitones</Label>
+          <div className="flex items-center gap-4">
+            <input
+              type="range"
+              min={-12}
+              max={12}
+              step={1}
+              value={settings.rvc.f0UpKey}
+              onChange={(e) => handleParamChange('f0UpKey', parseInt(e.target.value))}
+              className="flex-1"
+              disabled={!isModelLoaded}
+            />
+            <span className="text-sm w-12 text-right">{settings.rvc.f0UpKey > 0 ? '+' : ''}{settings.rvc.f0UpKey}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">Shift pitch up or down. 0 = no change, +12 = one octave up.</p>
+        </div>
+
+        {/* Index Rate */}
+        <div className="space-y-2">
+          <Label>Index Rate: {settings.rvc.indexRate.toFixed(2)}</Label>
+          <div className="flex items-center gap-4">
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={settings.rvc.indexRate}
+              onChange={(e) => handleParamChange('indexRate', parseFloat(e.target.value))}
+              className="flex-1"
+              disabled={!isModelLoaded}
+            />
+            <span className="text-sm w-12 text-right">{settings.rvc.indexRate.toFixed(2)}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">FAISS index influence on timbre. Higher = more timbre from the voice model.</p>
+        </div>
+
+        {/* Filter Radius */}
+        <div className="space-y-2">
+          <Label>Filter Radius: {settings.rvc.filterRadius}</Label>
+          <div className="flex items-center gap-4">
+            <input
+              type="range"
+              min={0}
+              max={7}
+              step={1}
+              value={settings.rvc.filterRadius}
+              onChange={(e) => handleParamChange('filterRadius', parseInt(e.target.value))}
+              className="flex-1"
+              disabled={!isModelLoaded}
+            />
+            <span className="text-sm w-12 text-right">{settings.rvc.filterRadius}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">Pitch smoothing. Higher values reduce pitch jitter.</p>
+        </div>
+
+        {/* Resample Rate */}
+        <div className="space-y-2">
+          <Label>Resample Rate</Label>
+          <Select
+            value={String(settings.rvc.resampleSr)}
+            onValueChange={(value) => handleParamChange('resampleSr', parseInt(value))}
+            options={RESAMPLE_RATE_OPTIONS}
+            disabled={!isModelLoaded}
+          />
+          <p className="text-xs text-muted-foreground">Output audio resample rate. 0 = use model default.</p>
+        </div>
+
+        {/* Volume Envelope */}
+        <div className="space-y-2">
+          <Label>Volume Envelope: {settings.rvc.volumeEnvelope.toFixed(2)}</Label>
+          <div className="flex items-center gap-4">
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={settings.rvc.volumeEnvelope}
+              onChange={(e) => handleParamChange('volumeEnvelope', parseFloat(e.target.value))}
+              className="flex-1"
+              disabled={!isModelLoaded}
+            />
+            <span className="text-sm w-12 text-right">{settings.rvc.volumeEnvelope.toFixed(2)}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">Volume envelope mixing. 0 = use original envelope.</p>
+        </div>
+
+        {/* Protect Consonants */}
+        <div className="space-y-2">
+          <Label>Protect Consonants: {settings.rvc.protect.toFixed(2)}</Label>
+          <div className="flex items-center gap-4">
+            <input
+              type="range"
+              min={0}
+              max={0.5}
+              step={0.01}
+              value={settings.rvc.protect}
+              onChange={(e) => handleParamChange('protect', parseFloat(e.target.value))}
+              className="flex-1"
+              disabled={!isModelLoaded}
+            />
+            <span className="text-sm w-12 text-right">{settings.rvc.protect.toFixed(2)}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">Protect voiceless consonants from artifacts. Higher = more protection.</p>
+        </div>
+
+        {/* RMS Mix Rate */}
+        <div className="space-y-2">
+          <Label>RMS Mix Rate: {settings.rvc.rmsMixRate.toFixed(2)}</Label>
+          <div className="flex items-center gap-4">
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={settings.rvc.rmsMixRate}
+              onChange={(e) => handleParamChange('rmsMixRate', parseFloat(e.target.value))}
+              className="flex-1"
+              disabled={!isModelLoaded}
+            />
+            <span className="text-sm w-12 text-right">{settings.rvc.rmsMixRate.toFixed(2)}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">Loudness matching with original audio. Higher = closer to model loudness.</p>
+        </div>
+      </div>
+
+      {/* Test Voice Button */}
+      <div className="space-y-2">
+        <Button
+          disabled={!isModelLoaded}
+          onClick={handleTestVoice}
+          className="w-full gap-2"
+        >
+          <Mic className="w-4 h-4" />
+          Test Voice (3s recording)
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Records 3 seconds from your microphone, converts through the loaded voice model, and plays back.
+        </p>
+      </div>
+
+      {/* Info Box */}
+      <div className="rounded-lg bg-secondary p-4 text-sm">
+        <p className="font-medium mb-2">About Voice Conversion</p>
+        <ul className="list-disc list-inside space-y-1 text-muted-foreground text-xs">
+          <li>RVC (Retrieval-based Voice Conversion) transforms TTS audio into a selected voice</li>
+          <li>Place .pth model files in the models/rvc/voices folder, or use Browse to select from anywhere</li>
+          <li>.index files are optional but improve timbre accuracy when placed alongside the .pth file</li>
+          <li>CPU processing adds 1-5 seconds of latency depending on audio length</li>
+          <li>Disabling the toggle also unloads the model to free memory</li>
         </ul>
       </div>
     </div>
