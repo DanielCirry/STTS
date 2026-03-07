@@ -11,6 +11,7 @@ from ai.assistant.cloud_providers import (
     set_api_key,
     delete_api_key
 )
+from ai.assistant.free_provider import FreeProvider
 from ai.assistant.manager import AIAssistantManager
 from ai.assistant.fallback import FallbackAIManager
 
@@ -21,6 +22,7 @@ __all__ = [
     'Message',
     'truncate_response',
     'LocalLLMProvider',
+    'FreeProvider',
     'RECOMMENDED_MODELS',
     'OpenAIProvider',
     'AnthropicProvider',

@@ -46,6 +46,27 @@ class EventType(str, Enum):
     MODEL_ERROR = 'model_error'
     MODEL_DOWNLOAD_PROGRESS = 'model_download_progress'
 
+    # RVC Voice Conversion
+    RVC_MODEL_LOADING = 'rvc_model_loading'
+    RVC_MODEL_LOADED = 'rvc_model_loaded'
+    RVC_MODEL_ERROR = 'rvc_model_error'
+    RVC_UNLOADED = 'rvc_unloaded'
+    RVC_STATUS = 'rvc_status'
+    RVC_PARAMS_UPDATED = 'rvc_params_updated'
+    RVC_DOWNLOAD_PROGRESS = 'rvc_download_progress'
+    RVC_BASE_MODELS_NEEDED = 'rvc_base_models_needed'
+    RVC_TEST_VOICE_READY = 'rvc_test_voice_ready'
+    RVC_TEST_VOICE_ERROR = 'rvc_test_voice_error'
+    RVC_CONVERSION_FAILED = 'rvc_conversion_failed'
+    RVC_MIC_STARTED = 'rvc_mic_started'
+    RVC_MIC_STOPPED = 'rvc_mic_stopped'
+    RVC_MIC_ERROR = 'rvc_mic_error'
+
+    # VOICEVOX Engine Setup
+    VOICEVOX_SETUP_STATUS = 'voicevox_setup_status'
+    VOICEVOX_SETUP_PROGRESS = 'voicevox_setup_progress'
+    VOICEVOX_ENGINE_STATUS = 'voicevox_engine_status'
+
     # VRChat
     VRCHAT_SENT = 'vrchat_sent'
     VRCHAT_STATUS = 'vrchat_status'

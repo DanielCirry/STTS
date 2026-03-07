@@ -1,0 +1,2 @@
+# Local LLM (llama.cpp) - adds ~50MB
+llama-cpp-python>=0.2.50

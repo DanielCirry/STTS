@@ -133,7 +133,7 @@ class FreeTranslationManager:
     def set_mymemory_email(self, email: str):
         """Set email for MyMemory 50K/day tier (vs 5K anonymous)."""
         self._email = email
-        logger.info(f"MyMemory email set: {email[:3]}***")
+        logger.debug(f"MyMemory email set: {email[:3]}***")
 
     def translate(self, text: str, source_nllb: str, target_nllb: str) -> Optional[str]:
         """Try each available free provider in order.
@@ -170,13 +170,13 @@ class FreeTranslationManager:
                 result = provider._translate(text, src, tgt)
                 if result:
                     provider.mark_success()
-                    logger.info(
+                    logger.debug(
                         f"Free translation [{provider.name}]: "
                         f"'{text[:40]}' -> '{result[:40]}'"
                     )
                     return result
             except RateLimitError as e:
-                logger.info(f"{provider.name} rate limited ({e}), trying next provider...")
+                logger.debug(f"{provider.name} rate limited ({e}), trying next provider...")
                 provider.mark_rate_limited(86400)
                 continue
             except ProviderUnavailableError as e:

@@ -1,0 +1,57 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-ssr
+*.local
+
+# Python
+python/venv/
+python/__pycache__/
+python/**/__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller
+python/build/
+python/dist/
+*.spec.bak
+
+# NSIS output
+STTS-Setup.exe
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Claude
+.claude/
+
+# Planning docs
+.planning/
+
+# Misc
+nul
+*.zip
+models/
+src-tauri/
+voicevox_speakers.json
+STTS_Missing_Features.md
+launcher/build/

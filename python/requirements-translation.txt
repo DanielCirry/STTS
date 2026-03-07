@@ -1,0 +1,6 @@
+# Translation (NLLB) - requires PyTorch
+# If you haven't installed PyTorch yet, install it first:
+#   CPU:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu121
+transformers>=4.35.0
+sentencepiece>=0.1.99

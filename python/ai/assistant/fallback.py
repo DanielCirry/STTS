@@ -19,6 +19,7 @@ from ai.assistant.base import AssistantResponse, Message
 logger = logging.getLogger('stts.assistant.fallback')
 
 AI_PROVIDER_LABELS = {
+    'free': 'Free',
     'local': 'local',
     'groq': 'Groq',
     'google': 'Gemini',
@@ -30,6 +31,7 @@ AI_PROVIDER_LABELS = {
 # Local LLM: 4 messages (2 turns) — small context, slow inference.
 # Cloud providers: 10 messages (full context_messages default).
 PROVIDER_CONTEXT_LIMITS = {
+    'free': 6,
     'local': 4,
     'groq': 10,
     'google': 10,
@@ -84,7 +86,7 @@ class ProviderState:
 class FallbackAIManager:
     """Wraps AIAssistantManager with automatic provider fallback."""
 
-    DEFAULT_PRIORITY = ['local', 'groq', 'google', 'openai', 'anthropic']
+    DEFAULT_PRIORITY = ['free', 'local', 'groq', 'google', 'openai', 'anthropic']
     CLOUD_TIMEOUT = 15.0            # Seconds per cloud provider attempt
     NETWORK_RETRY_INTERVAL = 60.0   # Seconds before retrying cloud after network loss
 

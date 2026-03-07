@@ -42,6 +42,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 }
 
 const AI_PROVIDER_LABELS: Record<string, string> = {
+  free: 'Free',
   local: 'Local LLM',
   groq: 'Groq',
   google: 'Gemini',
@@ -50,7 +51,7 @@ const AI_PROVIDER_LABELS: Record<string, string> = {
 }
 
 export function StatusBar({ connected, audioLevel = 0, detectedLanguage, speakerCapturing, ttsEngine }: StatusBarProps) {
-  const { isListening, isProcessing, activeTranslationProvider, activeAIProvider, aiOfflineMode } = useChatStore()
+  const { isListening, isMicRvcActive, isProcessing, activeTranslationProvider, activeAIProvider, aiOfflineMode } = useChatStore()
   const settings = useSettingsStore()
   const errorCount = useNotificationStore((s) => s.errorCount)
 
@@ -66,9 +67,7 @@ export function StatusBar({ connected, audioLevel = 0, detectedLanguage, speaker
     ? 'text-red-500'
     : isProcessing
     ? 'text-yellow-500'
-    : isListening
-    ? 'text-green-500'
-    : 'text-muted-foreground'
+    : 'text-green-500'
 
   // Build active translation pair label
   const activePair = settings.translation.languagePairs[settings.translation.activePairIndex]
@@ -96,7 +95,7 @@ export function StatusBar({ connected, audioLevel = 0, detectedLanguage, speaker
       </div>
 
       {/* Audio level meter */}
-      {isListening && (
+      {(isListening || isMicRvcActive) && (
         <>
           <div className="h-3 w-px bg-border shrink-0" />
           <div className="flex items-center gap-1.5 shrink-0">
@@ -119,10 +118,6 @@ export function StatusBar({ connected, audioLevel = 0, detectedLanguage, speaker
           <span className="ml-1 text-primary font-medium">[{detectedLabel}]</span>
         )}
       </span>
-
-      <div className="h-3 w-px bg-border shrink-0" />
-
-      <span className="shrink-0">Device: {settings.stt.device.toUpperCase()}</span>
 
       {/* Translation pair */}
       {settings.translation.enabled && pairLabel && (
@@ -189,9 +184,6 @@ export function StatusBar({ connected, audioLevel = 0, detectedLanguage, speaker
         </>
       )}
 
-      <div className="h-3 w-px bg-border shrink-0" />
-
-      <span className="shrink-0">VRC: {settings.vrchat.oscEnabled ? '✓' : '✗'}</span>
     </div>
   )
 }
