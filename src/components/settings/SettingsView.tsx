@@ -2862,7 +2862,7 @@ function OverlaySettings() {
         </div>
 
         {/* VR Translation */}
-        <div className="border border-border rounded-lg overflow-hidden col-span-2">
+        <div className="border border-border rounded-lg overflow-hidden">
           <div className="flex items-center justify-between p-2 bg-secondary/20">
             <div className="flex items-center gap-1.5">
               <div className="w-2 h-2 rounded-sm bg-cyan-400" />
@@ -2963,31 +2963,34 @@ function OverlaySettings() {
                   }}
                   className="w-full accent-primary" />
               </div>
-              {/* Manual capture button */}
-              {ocr.mode === 'manual' && (
-                <button
-                  onClick={() => {
-                    console.log('[Settings] VRT manual capture')
-                    sendMessage({ type: 'ocr_capture' })
-                  }}
-                  className="w-full flex items-center justify-center gap-1.5 p-1.5 rounded text-xs font-medium bg-secondary hover:bg-secondary/80 transition-colors border border-border"
-                >
-                  <ScanText className="w-3.5 h-3.5" />
-                  Capture Now
-                </button>
-              )}
+              {/* Manual capture button — always visible, greyed when auto */}
+              <button
+                disabled={ocr.mode !== 'manual'}
+                onClick={() => {
+                  console.log('[Settings] VRT manual capture')
+                  sendMessage({ type: 'ocr_capture' })
+                }}
+                className={`w-full flex items-center justify-center gap-1.5 p-1.5 rounded text-xs font-medium transition-colors border border-border ${
+                  ocr.mode !== 'manual' ? 'opacity-40 cursor-not-allowed bg-secondary text-muted-foreground' : 'bg-secondary hover:bg-secondary/80'
+                }`}
+              >
+                <ScanText className="w-3.5 h-3.5" />
+                Capture Now
+              </button>
               {/* Languages info */}
               <div className="text-[10px] text-muted-foreground bg-secondary/30 rounded p-2">
-                <p className="mb-1">Uses languages from your Translation settings:</p>
-                <p className="font-mono">
-                  {translation.languagePairs.length > 0
-                    ? translation.languagePairs.map(p => {
-                        const src = LANGUAGES.find(l => l.value === p.source)?.label || p.source
-                        const tgt = LANGUAGES.find(l => l.value === p.target)?.label || p.target
-                        return `${src} → ${tgt}`
-                      }).join(', ')
-                    : 'No language pairs configured'}
-                </p>
+                {translation.languagePairs.length > 0
+                  ? (() => {
+                      const langs = new Set<string>()
+                      translation.languagePairs.forEach(p => {
+                        const src = LANGUAGES.find(l => l.value === p.sourceLanguage)?.label
+                        const tgt = LANGUAGES.find(l => l.value === p.targetLanguage)?.label
+                        if (src) langs.add(src)
+                        if (tgt) langs.add(tgt)
+                      })
+                      return Array.from(langs).join(', ')
+                    })()
+                  : 'No languages configured'}
               </div>
               {/* Controller Bindings */}
               <div className="space-y-1.5">
@@ -3000,8 +3003,7 @@ function OverlaySettings() {
                       sendMessage({ type: 'update_settings', payload: { ocr: { controllerBindingEnabled: v } } })
                     }} />
                 </div>
-                {ocr.controllerBindingEnabled && (
-                  <div className="space-y-1.5">
+                <div className={`space-y-1.5 ${!ocr.controllerBindingEnabled ? 'opacity-40 pointer-events-none' : ''}`}>
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-muted-foreground">Capture</span>
                       <div className="flex items-center gap-1">
@@ -3091,7 +3093,6 @@ function OverlaySettings() {
                       </div>
                     </div>
                   </div>
-                )}
               </div>
             </div>
           )}

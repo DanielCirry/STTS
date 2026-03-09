@@ -3248,17 +3248,6 @@ class STTSEngine:
             return None
 
         if not self._ocr_engine.is_loaded:
-            # Check if easyocr is installed before trying to initialize
-            try:
-                import importlib
-                importlib.import_module('easyocr')
-            except ImportError:
-                logger.warning("[ocr] EasyOCR not installed — cannot capture")
-                await self.broadcast(create_event(EventType.OCR_ERROR, {
-                    'error': 'OCR feature not installed. Go to Settings → Install Features to install it.'
-                }))
-                return None
-            # Auto-initialize on first capture
             success = await self.ocr_initialize()
             if not success:
                 await self.broadcast(create_event(EventType.OCR_ERROR, {
