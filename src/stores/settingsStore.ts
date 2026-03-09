@@ -16,6 +16,7 @@ interface AudioSettings {
 }
 
 interface STTSettings {
+  enabled: boolean
   model: string
   language: string
   device: ComputeDevice
@@ -194,6 +195,7 @@ const defaultSettings: Settings = {
     vadSensitivity: 0.5,
   },
   stt: {
+    enabled: true,
     model: 'whisper-base',
     language: 'en',
     device: 'cpu',

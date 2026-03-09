@@ -344,41 +344,38 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
         </select>
       </div>
 
-      {/* Row 5: Translation */}
+      {/* Row 5: Translation — device + provider */}
       <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
         <div className="flex items-center gap-2">
           <Languages className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm">Translate</span>
         </div>
-        <DeviceToggle
-          device={settings.translation.device}
-          onChange={(d) => {
-            console.log('[Settings] Translation device change', d)
-            settings.updateTranslation({ device: d })
-            sendMessage({ type: 'update_settings', payload: { translation: { device: d } } })
-            restartForDevice()
-          }}
-        />
-      </div>
-
-      {/* Row 5b: Translation Model — dropdown for quick selection */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4">
-        <span className="text-xs text-muted-foreground">Model</span>
-        <select
-          value={settings.translation.model}
-          onChange={(e) => {
-            const model = e.target.value
-            console.log('[Settings] Translation model change (quick)', model)
-            settings.updateTranslation({ model })
-            sendMessage({ type: 'update_settings', payload: { translation: { model } } })
-            sendMessage({ type: 'load_model', payload: { type: 'translation', id: model } })
-          }}
-          className="bg-secondary border border-border rounded px-2 py-1 text-xs max-w-[200px]"
-        >
-          {TRANSLATION_MODELS.map(m => (
-            <option key={m.value} value={m.value}>{m.label}</option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          <DeviceToggle
+            device={settings.translation.device}
+            onChange={(d) => {
+              console.log('[Settings] Translation device change', d)
+              settings.updateTranslation({ device: d })
+              sendMessage({ type: 'update_settings', payload: { translation: { device: d } } })
+              restartForDevice()
+            }}
+          />
+          <select
+            value={settings.translation.provider}
+            onChange={(e) => {
+              const provider = e.target.value
+              console.log('[Settings] Translation provider change (quick)', provider)
+              settings.updateTranslation({ provider: provider as 'local' | 'free' | 'deepl' | 'google' })
+              sendMessage({ type: 'update_settings', payload: { translation: { provider } } })
+            }}
+            className="bg-secondary border border-border rounded px-2 py-1 text-xs w-24"
+          >
+            <option value="free">Free</option>
+            <option value="local">Local</option>
+            <option value="deepl">DeepL</option>
+            <option value="google">Google</option>
+          </select>
+        </div>
       </div>
 
       {/* Row 6: AI Assistant */}
@@ -388,9 +385,13 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
           <span className="text-sm">AI</span>
           {settings.ai.provider === 'local' && settings.ai.localModel ? (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">loaded</span>
+          ) : settings.ai.provider === 'local' && !settings.ai.localModel ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">no model</span>
           ) : settings.ai.provider !== 'local' && settings.ai.enabled ? (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{settings.ai.provider}</span>
-          ) : null}
+          ) : (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">off</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <DeviceToggle
@@ -419,7 +420,7 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
         </div>
       </div>
 
-      {/* Row 6b: AI Model — submenu for cloud model or local model selection */}
+      {/* Row 6b: AI Model — submenu for cloud model or local model name */}
       {settings.ai.provider !== 'local' && CLOUD_MODELS[settings.ai.provider] && (
         <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4">
           <span className="text-xs text-muted-foreground">Model</span>
@@ -437,6 +438,16 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
               <option key={m.value} value={m.value}>{m.label}</option>
             ))}
           </select>
+        </div>
+      )}
+      {settings.ai.provider === 'local' && (
+        <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4">
+          <span className="text-xs text-muted-foreground">Model</span>
+          <span className="text-xs truncate max-w-[200px]">
+            {settings.ai.localModel
+              ? settings.ai.localModel.replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || settings.ai.localModel
+              : 'None loaded'}
+          </span>
         </div>
       )}
 
@@ -793,6 +804,24 @@ function ModelsSettings() {
         </p>
       </div>
 
+      {/* Enable/Disable Toggle */}
+      <div className="flex items-center justify-between">
+        <div className="space-y-0.5">
+          <Label>Enable Speech Recognition</Label>
+          <p className="text-xs text-muted-foreground">
+            Transcribe your voice to text
+          </p>
+        </div>
+        <Switch
+          checked={stt.enabled}
+          onCheckedChange={(checked) => {
+            console.log('[Settings] STT enabled toggle', checked)
+            updateSTT({ enabled: checked })
+            updateSettings({ stt: { enabled: checked } })
+          }}
+        />
+      </div>
+
       {/* GPU Info Display */}
       {gpu && gpu.available && (
         <div className="rounded-lg bg-green-500/10 border border-green-500/20 p-3">
@@ -817,7 +846,14 @@ function ModelsSettings() {
           )}
         </div>
       )}
-      {gpu && !gpu.available && (
+      {gpu && !gpu.available && gpu.name === undefined && (
+        <div className="rounded-lg bg-secondary/50 border border-border p-3">
+          <p className="text-xs text-muted-foreground">
+            GPU info loading... Models will use the selected compute device.
+          </p>
+        </div>
+      )}
+      {gpu && !gpu.available && gpu.name !== undefined && (
         <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 p-3">
           <p className="text-xs text-yellow-400">
             No NVIDIA GPU detected. Models will run on CPU (slower but works everywhere).
@@ -1735,7 +1771,7 @@ interface LocalModel {
 
 function AISettings() {
   const { ai, updateAI } = useSettingsStore()
-  const { updateSettings, getLocalModels, loadLocalModel, lastMessage, setModelsDirectory, getModelsDirectory, browseLLMFolder, browseLLMModel, getLLMStatus } = useBackend()
+  const { updateSettings, getLocalModels, loadLocalModel, lastMessage, setModelsDirectory, getModelsDirectory, browseLLMFolder, browseLLMModel, getLLMStatus, unloadLLM } = useBackend()
   const [localModels, setLocalModels] = useState<LocalModel[]>([])
   const [loadingModel, setLoadingModel] = useState<string | null>(null)
   const [modelError, setModelError] = useState<string | null>(null)
@@ -1785,8 +1821,10 @@ function AISettings() {
       console.log('[Settings] LLM status:', payload)
       if (payload.loaded && payload.model_path) {
         updateAI({ localModel: payload.model_path })
-      } else if (!payload.loaded && ai.localModel) {
-        // Backend says not loaded but we have a saved model — auto-reload it
+        setLoadingModel(null)
+        setModelError(null)
+      } else if (!payload.loaded && ai.localModel && !loadingModel) {
+        // Backend says not loaded but we have a saved model — auto-reload it (only if not already loading)
         console.log('[Settings] LLM not loaded on backend, auto-reloading:', ai.localModel)
         setLoadingModel(ai.localModel)
         loadLocalModel(ai.localModel)
@@ -1805,6 +1843,14 @@ function AISettings() {
         setCustomDir(payload.path || '')
         setLocalModels(payload.models || [])
         updateAI({ modelsDirectory: payload.path || '' })
+      }
+    } else if (lastMessage?.type === 'llm_unloaded') {
+      const payload = lastMessage.payload as { success?: boolean }
+      if (payload.success) {
+        console.log('[Settings] LLM unloaded successfully')
+        updateAI({ localModel: '' })
+        setLoadingModel(null)
+        setModelError(null)
       }
     } else if (lastMessage?.type === 'llm_model_browsed') {
       const payload = lastMessage.payload as { path?: string; directory?: string; models?: LocalModel[] }
@@ -1870,6 +1916,9 @@ function AISettings() {
           onCheckedChange={(checked) => { console.log('[Settings] AI enabled toggle', checked); updateAI({ enabled: checked }) }}
         />
       </div>
+
+      {/* Everything below toggle is disabled when AI is off */}
+      <div className={!ai.enabled ? 'opacity-50 pointer-events-none' : ''}>
 
       {/* Keyword */}
       <div className="space-y-2">
@@ -2017,7 +2066,20 @@ function AISettings() {
                         </div>
                       </button>
                       {isLoaded && (
-                        <Check className="w-4 h-4 text-green-500 shrink-0 ml-2" />
+                        <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                          <Check className="w-4 h-4 text-green-500" />
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              console.log('[Settings] Unload LLM model')
+                              unloadLLM()
+                            }}
+                            className="px-2 py-0.5 rounded text-[10px] font-medium bg-secondary hover:bg-destructive/20 hover:text-destructive transition-colors border border-border"
+                            title="Unload model"
+                          >
+                            Unload
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -2081,19 +2143,26 @@ function AISettings() {
                   disabled={!ai.enabled}
                   className={`p-3 rounded-lg border text-left transition-colors ${
                     selected
-                      ? 'bg-primary/10 border-primary'
+                      ? 'bg-green-500/10 border-green-500/50'
                       : 'bg-secondary border-border hover:border-primary/50'
                   } ${!ai.enabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
                 >
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-medium">{model.label}</p>
-                    {model.badge && (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                        selected ? 'bg-primary/20 text-primary' : 'bg-muted text-muted-foreground'
-                      }`}>
-                        {model.badge}
-                      </span>
-                    )}
+                    <div className="flex items-center gap-1.5">
+                      {selected && (
+                        <span className="flex items-center gap-1 text-xs text-green-500">
+                          <Check className="w-3 h-3" />
+                        </span>
+                      )}
+                      {model.badge && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                          selected ? 'bg-green-500/20 text-green-400' : 'bg-muted text-muted-foreground'
+                        }`}>
+                          {model.badge}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </button>
               )
@@ -2166,6 +2235,10 @@ function AISettings() {
           Shorter responses are faster to speak
         </p>
       </div>
+
+      {/* Max Response Length end */}
+
+      </div>{/* End disabled wrapper */}
 
       {/* Info Box */}
       <div className="rounded-lg bg-secondary p-4 text-sm">

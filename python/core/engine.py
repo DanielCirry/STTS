@@ -2337,6 +2337,22 @@ class STTSEngine:
             return {'loaded': False, 'model': None, 'model_path': None}
         return self._ai_assistant.get_llm_status()
 
+    def unload_llm(self) -> bool:
+        """Unload the current local LLM model."""
+        if not self._ai_assistant:
+            return False
+        try:
+            from ai.assistant.local_llm import LocalLLMProvider
+            provider = self._ai_assistant._providers.get('local')
+            if isinstance(provider, LocalLLMProvider):
+                provider.unload_model()
+                logger.info("[llm] Local LLM unloaded")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[llm] Failed to unload LLM: {e}")
+            return False
+
     def get_local_models_directory(self) -> str:
         """Get the current local models directory.
 

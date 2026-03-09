@@ -419,6 +419,12 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
                 status = engine.get_llm_status()
                 await websocket.send(json.dumps({'type': 'llm_status', 'payload': status}))
 
+        elif msg_type == 'unload_llm':
+            logger.debug("[ws] unload_llm")
+            if engine:
+                success = engine.unload_llm()
+                await websocket.send(json.dumps({'type': 'llm_unloaded', 'payload': {'success': success}}))
+
         elif msg_type == 'browse_llm_folder':
             logger.debug("[ws] browse_llm_folder")
             if engine:

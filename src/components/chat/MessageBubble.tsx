@@ -1,4 +1,4 @@
-import { Mic, Keyboard, User, Bot, AlertTriangle } from 'lucide-react'
+import { Mic, Keyboard, User, Bot, AlertTriangle, Info } from 'lucide-react'
 import type { ChatMessage } from '@/stores'
 
 interface MessageBubbleProps {
@@ -9,6 +9,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.type === 'user'
   const isAI = message.type === 'ai'
   const isSpeaker = message.type === 'speaker'
+  const isSystem = message.type === 'system'
   const isError = isAI && message.originalText.startsWith('Error:')
 
   // Parse error message for helpful hints
@@ -28,11 +29,13 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const errorHint = isError ? getErrorHint(message.originalText) : null
 
   return (
-    <div className={`flex ${isUser || isAI ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex ${isSystem ? 'justify-center' : isUser || isAI ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`rounded-lg px-4 py-2 max-w-[70%] ${
+        className={`rounded-lg px-4 py-2 ${isSystem ? 'max-w-[85%]' : 'max-w-[70%]'} ${
           isError
             ? 'bg-destructive/20 text-destructive border border-destructive/30'
+            : isSystem
+            ? 'bg-muted/50 text-muted-foreground border border-border/50'
             : isUser
             ? 'bg-primary text-primary-foreground'
             : isAI
@@ -41,6 +44,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         }`}
       >
         {/* Speaker indicator */}
+        {!isSystem && (
         <div className="flex items-center gap-2 mb-1">
           {isSpeaker && <User className="w-3 h-3" />}
           {isUser && message.inputSource === 'text' && <Keyboard className="w-3 h-3" />}
@@ -57,9 +61,15 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               : 'AI'}
           </span>
         </div>
+        )}
 
         {/* Text content */}
-        {message.translatedText ? (
+        {isSystem ? (
+          <p className="text-xs flex items-center gap-1.5">
+            <Info className="w-3 h-3 shrink-0" />
+            {message.originalText}
+          </p>
+        ) : message.translatedText ? (
           <>
             <p className="text-xs opacity-60">{message.originalText}</p>
             <p className="text-sm mt-1">{message.translatedText}</p>

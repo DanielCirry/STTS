@@ -317,7 +317,7 @@ def main():
     for _attempt in range(port_retries):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('127.0.0.1', WS_PORT))
+                s.bind(('0.0.0.0', WS_PORT))
             port_free = True
             break
         except OSError:

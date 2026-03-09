@@ -245,27 +245,32 @@ function handleGlobalMessage(message: BackendMessage) {
       chatStore.setSpeaking(false)
       break
 
-    case 'model_loading':
+    case 'model_loading': {
       modelStore.updateModelStatus(
         payload.id as string,
         'loading'
       )
+      // Show friendly name (strip path, keep just filename without extension)
+      const loadingName = (payload.id as string).replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || payload.id as string
       chatStore.addMessage({
         type: 'system',
-        originalText: `Loading ${payload.type} model: ${payload.id}...`,
+        originalText: `Loading ${payload.type} model: ${loadingName}...`,
       })
       break
+    }
 
-    case 'model_loaded':
+    case 'model_loaded': {
       modelStore.updateModelStatus(
         payload.id as string,
         'loaded'
       )
+      const loadedName = (payload.id as string).replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || payload.id as string
       chatStore.addMessage({
         type: 'system',
-        originalText: `${payload.type} model loaded: ${payload.id}`,
+        originalText: `${payload.type} model loaded: ${loadedName}`,
       })
       break
+    }
 
     case 'model_error': {
       const notificationStore = useNotificationStore.getState()
@@ -275,9 +280,10 @@ function handleGlobalMessage(message: BackendMessage) {
         undefined,
         payload.error as string
       )
+      const errorName = (payload.id as string).replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || payload.id as string
       chatStore.addMessage({
         type: 'system',
-        originalText: `Error loading ${payload.type} model: ${payload.error || payload.id}`,
+        originalText: `Error loading ${payload.type} model: ${payload.error || errorName}`,
       })
 
       // Only show blocking dialog for STT errors (per RESEARCH pitfall 6)
@@ -674,6 +680,7 @@ export function useBackend() {
               'rvc_models_list', 'rvc_model_loading', 'rvc_model_loaded', 'rvc_model_error',
               'rvc_status', 'rvc_unloaded', 'rvc_params_updated', 'rvc_conversion_failed',
               'rvc_download_progress', 'rvc_base_models_needed',
+              'llm_unloaded',
               'rvc_test_voice_ready', 'rvc_test_voice_error', 'rvc_model_browsed',
               'rvc_mic_started', 'rvc_mic_stopped', 'rvc_mic_error', 'rvc_available_devices',
               'voicevox_setup_status', 'voicevox_setup_progress', 'voicevox_engine_status',
@@ -797,6 +804,10 @@ export function useBackend() {
     send({ type: 'browse_llm_model' })
   }, [send])
 
+  const unloadLLM = useCallback(() => {
+    send({ type: 'unload_llm' })
+  }, [send])
+
   const getLLMStatus = useCallback(() => {
     send({ type: 'get_llm_status' })
   }, [send])
@@ -854,5 +865,6 @@ export function useBackend() {
     browseLLMFolder,
     browseLLMModel,
     getLLMStatus,
+    unloadLLM,
   }
 }
