@@ -34,6 +34,10 @@ class AudioManager:
         self.vad_sensitivity = 0.5
         self._vad = None
 
+        # Noise gate — RMS threshold below which audio is treated as silence
+        # 0.0 = disabled, 0.005 = light gate, 0.01 = moderate, 0.02 = aggressive
+        self.noise_gate_threshold = 0.005
+
         # Callbacks
         self.on_audio_data: Optional[Callable[[np.ndarray], None]] = None
         self.on_audio_level: Optional[Callable[[float], None]] = None
@@ -309,13 +313,14 @@ class AudioManager:
             return True
 
     def _calculate_level(self, audio_data: np.ndarray) -> float:
-        """Calculate audio level in dB."""
-        rms = np.sqrt(np.mean(audio_data ** 2))
+        """Calculate audio level for visual feedback (0.0-1.0)."""
+        rms = np.sqrt(np.mean(audio_data.astype(np.float64) ** 2))
         if rms > 0:
-            db = 20 * np.log10(rms)
-            # Normalize to 0-1 range (assuming -60dB to 0dB range)
-            # Convert to Python float for JSON serialization
-            return float(max(0, min(1, (db + 60) / 60)))
+            db = 20 * np.log10(rms + 1e-10)
+            # Normalize to 0-1 range using -45dB to 0dB (more sensitive for speech)
+            normalized = float(max(0, min(1, (db + 45) / 45)))
+            # Apply sqrt curve for better visual response at low levels
+            return normalized ** 0.6
         return 0.0
 
     def start_microphone(self, device_id: Optional[int] = None):
@@ -345,9 +350,15 @@ class AudioManager:
                 if self.on_audio_level:
                     self.on_audio_level(level)
 
-                # Feed all audio to mic RVC (not gated by VAD)
+                # Feed all audio to mic RVC (not gated by VAD/noise gate)
                 if self.on_mic_rvc_data:
                     self.on_mic_rvc_data(audio_data)
+
+                # Noise gate: skip quiet audio (fan noise, keyboard at distance)
+                if self.noise_gate_threshold > 0:
+                    rms = float(np.sqrt(np.mean(audio_data ** 2)))
+                    if rms < self.noise_gate_threshold:
+                        return  # Below noise gate, discard
 
                 # Check for speech
                 if self._is_speech(audio_data):

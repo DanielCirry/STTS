@@ -230,11 +230,14 @@ class Pipeline:
                     f"({pad_samples} per side), returning unpadded"
                 )
 
-        # --- Step 6: RMS loudness matching ---
+        # --- Step 6: Post-conversion noise cleanup ---
+        audio_output = self._denoise_output(audio_output, self.tgt_sr)
+
+        # --- Step 7: RMS loudness matching ---
         if rms_mix_rate > 0:
             audio_output = match_rms(audio_output, input_rms, rms_mix_rate)
 
-        # --- Step 7: Optional output resampling ---
+        # --- Step 8: Optional output resampling ---
         output_sr = self.tgt_sr
         if resample_sr > 0 and resample_sr != self.tgt_sr:
             try:
@@ -250,6 +253,44 @@ class Pipeline:
         audio_output = np.clip(audio_output, -1.0, 1.0)
 
         return audio_output
+
+    @staticmethod
+    def _denoise_output(audio: np.ndarray, sr: int) -> np.ndarray:
+        """Post-conversion noise cleanup: high-pass filter + noise gate.
+
+        The VITS synthesizer injects noise during generation which can
+        produce audible hiss/rumble. This applies:
+        1. A 80Hz high-pass filter to remove low-frequency rumble
+        2. A soft noise gate that attenuates very quiet regions
+        """
+        # High-pass filter at 80Hz to remove synth rumble
+        if HAS_SCIPY:
+            try:
+                bh, ah = scipy_signal.butter(N=4, Wn=80, btype="high", fs=sr)
+                audio = scipy_signal.filtfilt(bh, ah, audio).astype(np.float32)
+            except Exception:
+                pass
+
+        # Soft noise gate: attenuate samples below threshold
+        # Uses short-time RMS to detect quiet regions
+        frame_len = int(sr * 0.02)  # 20ms frames
+        hop = frame_len // 2
+        gate_threshold = 0.015  # -36dB roughly
+        n_frames = max(1, (len(audio) - frame_len) // hop + 1)
+
+        # Compute per-frame RMS
+        gains = np.ones(len(audio), dtype=np.float32)
+        for i in range(n_frames):
+            start = i * hop
+            end = min(start + frame_len, len(audio))
+            frame_rms = np.sqrt(np.mean(audio[start:end] ** 2))
+            if frame_rms < gate_threshold:
+                # Smooth attenuation (not hard gate) — scale by ratio
+                gain = frame_rms / gate_threshold  # 0.0 to 1.0
+                gains[start:end] = np.minimum(gains[start:end], gain)
+
+        audio = audio * gains
+        return audio
 
     def _extract_f0(
         self,

@@ -417,6 +417,36 @@ function handleGlobalMessage(message: BackendMessage) {
       break
     }
 
+    case 'ocr_result':
+      console.log('[useBackend] OCR result:', payload.count, 'blocks')
+      break
+
+    case 'ocr_status':
+      console.log('[useBackend] OCR status:', payload)
+      // Sync VR region drag back to settings
+      if (payload.region_updated) {
+        const region = payload.region_updated
+        console.log('[useBackend] OCR region updated from VR:', region)
+        useSettingsStore.getState().updateOCR({
+          captureRegion: {
+            ...useSettingsStore.getState().ocr.captureRegion,
+            x: region.x ?? useSettingsStore.getState().ocr.captureRegion.x,
+            y: region.y ?? useSettingsStore.getState().ocr.captureRegion.y,
+            width: region.width ?? useSettingsStore.getState().ocr.captureRegion.width,
+            height: region.height ?? useSettingsStore.getState().ocr.captureRegion.height,
+          }
+        })
+      }
+      break
+
+    case 'ocr_error':
+      console.error('[useBackend] OCR error:', payload.error)
+      useNotificationStore.getState().addToast(
+        `OCR error: ${payload.error || 'Unknown error'}`,
+        'error'
+      )
+      break
+
     case 'error':
       console.error('Backend error:', payload.message)
       break
@@ -576,7 +606,16 @@ export function useBackend() {
               speaker_capture_device: settings.audio.speakerCaptureDeviceId ? parseInt(settings.audio.speakerCaptureDeviceId) : null,
               vad_enabled: settings.audio.enableVAD,
               vad_sensitivity: settings.audio.vadSensitivity,
+              enableNoiseSuppression: settings.audio.enableNoiseSuppression,
             },
+            ocr: {
+              enabled: settings.ocr.enabled,
+              device: settings.ocr.device,
+              mode: settings.ocr.mode,
+              interval: settings.ocr.interval,
+              confidence: settings.ocr.confidence,
+            },
+            output_profiles: settings.outputProfiles,
           }
         }))
         // Also resync RVC device after restart
@@ -683,6 +722,7 @@ export function useBackend() {
               'llm_unloaded',
               'rvc_test_voice_ready', 'rvc_test_voice_error', 'rvc_model_browsed',
               'rvc_mic_started', 'rvc_mic_stopped', 'rvc_mic_error', 'rvc_available_devices',
+              'ocr_result', 'ocr_status', 'ocr_error',
               'voicevox_setup_status', 'voicevox_setup_progress', 'voicevox_engine_status',
               'vrchat_sent', 'vrchat_status', 'tts_started', 'tts_finished',
               'tts_voices', 'tts_output_devices', 'audio_devices', 'loopback_test_result',

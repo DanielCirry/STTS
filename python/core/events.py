@@ -77,6 +77,11 @@ class EventType(str, Enum):
     OVERLAY_CLEARED = 'overlay_cleared'
     OVERLAY_STATUS = 'overlay_status'
 
+    # OCR
+    OCR_RESULT = 'ocr_result'
+    OCR_STATUS = 'ocr_status'
+    OCR_ERROR = 'ocr_error'
+
     # Settings
     SETTINGS_UPDATED = 'settings_updated'
 

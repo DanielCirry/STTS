@@ -44,6 +44,17 @@ _EMOJI_MAP = {
 # Fallback emojis when no keyword matches
 _FALLBACK_EMOJIS = ['😊', '✨', '👍', '🙂', '💫']
 
+# NLLB language code → EasyOCR language code mapping
+NLLB_TO_EASYOCR = {
+    'eng_Latn': 'en', 'jpn_Jpan': 'ja', 'kor_Hang': 'ko',
+    'zho_Hans': 'ch_sim', 'zho_Hant': 'ch_tra',
+    'spa_Latn': 'es', 'fra_Latn': 'fr', 'deu_Latn': 'de',
+    'ita_Latn': 'it', 'por_Latn': 'pt', 'rus_Cyrl': 'ru',
+    'arb_Arab': 'ar', 'hin_Deva': 'hi', 'tha_Thai': 'th',
+    'vie_Latn': 'vi', 'ind_Latn': 'id', 'nld_Latn': 'nl',
+    'pol_Latn': 'pl', 'tur_Latn': 'tr', 'ukr_Cyrl': 'uk',
+}
+
 
 def _insert_emojis(text: str, max_emojis: int = 3) -> str:
     """Insert emojis into text based on keyword matching. Pure post-processing."""
@@ -92,6 +103,9 @@ from ai.translator_cloud import CloudTranslationManager
 from ai.translator_free import FreeTranslationManager
 from integrations.vrchat_osc import VRChatOSC
 from integrations.vr_overlay import VROverlay
+from integrations.vr_ocr_overlay import VROCROverlay, get_vr_ocr_overlay
+from ai.ocr.ocr_engine import OCREngine
+from ai.ocr.ocr_renderer import render_translation_texture
 
 logger = logging.getLogger('stts.engine')
 
@@ -188,6 +202,15 @@ class STTSEngine:
                 'protect': 0.33,
                 'resample_sr': 0,
                 'volume_envelope': 0.0,
+            },
+            'ocr': {
+                'enabled': False,
+                'device': 'cpu',
+                'mode': 'manual',
+                'interval': 3,
+                'languages': ['en'],
+                'confidence': 0.3,
+                'crop_region': None,
             }
         }
 
@@ -207,6 +230,10 @@ class STTSEngine:
         self._vr_overlay: Optional[VROverlay] = None
         self._speaker_capture: Optional[SpeakerCapture] = None
         self._speaker_stt: Optional[SpeechToText] = None  # Separate STT for speaker
+
+        # OCR Engine
+        self._ocr_engine: Optional[OCREngine] = None
+        self._vr_ocr_overlay: Optional[VROCROverlay] = None
 
         # Speaker capture processing
         self._speaker_process_thread: Optional[threading.Thread] = None
@@ -715,6 +742,32 @@ class STTSEngine:
                     logger.debug("VR overlay initialization failed (SteamVR may not be running)")
         else:
             logger.debug("VR overlay not available (SteamVR not installed or no HMD)")
+
+        # Initialize OCR Engine (optional - requires easyocr + mss)
+        self._ocr_engine = OCREngine()
+        self._ocr_engine.on_ocr_complete = self._on_ocr_complete
+        self._ocr_engine.on_status_change = self._on_ocr_status_change
+        self._ocr_engine.set_translate_fn(self._ocr_translate_text)
+        logger.debug("OCR engine initialized (model loads lazily on first use)")
+
+        # Initialize VR OCR Overlay (depends on VR overlay being initialized)
+        self._vr_ocr_overlay = get_vr_ocr_overlay()
+        if self._vr_overlay and self._vr_overlay.is_initialized:
+            if self._vr_ocr_overlay.initialize(self._vr_overlay._openvr):
+                self._vr_ocr_overlay.on_capture_triggered = self._on_vr_ocr_capture
+                self._vr_ocr_overlay.on_toggle_region = self._on_vr_ocr_region_toggle
+                self._vr_ocr_overlay.on_region_changed = self._on_vr_ocr_region_changed
+                self._vr_ocr_overlay.start_event_polling()
+                # Apply saved OCR settings
+                ocr_settings = self.settings.get('ocr', {})
+                self._vr_ocr_overlay.update_settings(ocr_settings)
+                if ocr_settings.get('enabled', False):
+                    self._vr_ocr_overlay.set_enabled(True)
+                logger.debug("VR OCR overlay initialized and polling")
+            else:
+                logger.debug("VR OCR overlay initialization failed")
+        else:
+            logger.debug("VR OCR overlay skipped (VR overlay not initialized)")
 
         # Initialize Speaker Capture (for capturing system audio)
         self._speaker_capture = SpeakerCapture()
@@ -1455,6 +1508,11 @@ class STTSEngine:
                 self._audio_manager.vad_enabled = audio_settings['vad_enabled']
             if 'vad_sensitivity' in audio_settings:
                 self._audio_manager.vad_sensitivity = audio_settings['vad_sensitivity']
+            if 'enableNoiseSuppression' in audio_settings:
+                # Enable/disable noise gate (0.005 threshold when on, 0 when off)
+                enabled = audio_settings['enableNoiseSuppression']
+                self._audio_manager.noise_gate_threshold = 0.005 if enabled else 0.0
+                logger.info(f"[audio] Noise gate {'enabled (0.005)' if enabled else 'disabled'}")
 
         # Apply TTS settings
         if self._tts and 'tts' in settings:
@@ -1656,6 +1714,65 @@ class STTSEngine:
                 # Update other settings if initialized
                 if self._vr_overlay.is_initialized:
                     self._vr_overlay.update_settings(self.settings.get('vrOverlay', {}))
+
+                    # Late-init VR OCR overlay if VR just became available
+                    if self._vr_ocr_overlay and not self._vr_ocr_overlay.is_initialized:
+                        if self._vr_ocr_overlay.initialize(self._vr_overlay._openvr):
+                            self._vr_ocr_overlay.on_capture_triggered = self._on_vr_ocr_capture
+                            self._vr_ocr_overlay.on_toggle_region = self._on_vr_ocr_region_toggle
+                            self._vr_ocr_overlay.on_region_changed = self._on_vr_ocr_region_changed
+                            self._vr_ocr_overlay.start_event_polling()
+                            ocr_s = self.settings.get('ocr', {})
+                            self._vr_ocr_overlay.update_settings(ocr_s)
+                            if ocr_s.get('enabled', False):
+                                self._vr_ocr_overlay.set_enabled(True)
+                            logger.debug("VR OCR overlay late-initialized")
+
+        # Apply OCR settings
+        if 'ocr' in settings:
+            ocr_settings = settings['ocr']
+            logger.info(f"[update_settings] OCR: {ocr_settings}")
+            if self._ocr_engine:
+                self._ocr_engine.update_settings(ocr_settings)
+
+                # Handle enable/disable
+                if 'enabled' in ocr_settings:
+                    if ocr_settings['enabled']:
+                        # Initialize OCR if languages or device changed
+                        if 'languages' in ocr_settings or 'device' in ocr_settings:
+                            if self._loop:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.ocr_initialize(),
+                                    self._loop
+                                )
+                        # Start auto mode if configured
+                        mode = self.settings.get('ocr', {}).get('mode', 'manual')
+                        if mode == 'automatic' and self._loop:
+                            asyncio.run_coroutine_threadsafe(
+                                self.ocr_start_auto(),
+                                self._loop
+                            )
+                    else:
+                        self.ocr_stop_auto()
+
+                # Handle mode changes
+                if 'mode' in ocr_settings:
+                    enabled = self.settings.get('ocr', {}).get('enabled', False)
+                    if enabled:
+                        if ocr_settings['mode'] == 'automatic':
+                            if self._loop:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.ocr_start_auto(),
+                                    self._loop
+                                )
+                        else:
+                            self.ocr_stop_auto()
+
+            # Forward OCR settings to VR OCR overlay
+            if self._vr_ocr_overlay and self._vr_ocr_overlay.is_initialized:
+                self._vr_ocr_overlay.update_settings(ocr_settings)
+                if 'enabled' in ocr_settings:
+                    self._vr_ocr_overlay.set_enabled(ocr_settings['enabled'])
 
         # Apply RVC settings
         if 'rvc' in settings:
@@ -2112,6 +2229,9 @@ class STTSEngine:
         for client in self._osc_clients.values():
             client.disconnect()
         self._osc_clients.clear()
+
+        if self._vr_ocr_overlay:
+            self._vr_ocr_overlay.shutdown()
 
         if self._vr_overlay:
             self._vr_overlay.shutdown()
@@ -2903,6 +3023,10 @@ class STTSEngine:
         mgr = self._get_voicevox_manager()
         success = await mgr.download_and_install(build_type)
         if success:
+            # Notify frontend that VOICEVOX is now installed
+            await self.broadcast(create_event(EventType.VOICEVOX_SETUP_STATUS, {
+                'installed': True,
+            }))
             started = await mgr.start_engine()
             if started and self._tts:
                 voicevox = self._tts._engines.get('voicevox')
@@ -2958,3 +3082,269 @@ class STTSEngine:
                 }))
         except Exception as e:
             logger.error(f"Failed to auto-start VOICEVOX: {e}")
+
+    # ── OCR Methods ──────────────────────────────────────────────────────
+
+    def _on_ocr_complete(self, ocr_results, translations):
+        """Handle OCR completion — render VR overlay + broadcast to frontend."""
+        logger.info(f"[ocr] OCR complete: {len(translations)} blocks translated")
+
+        # Render translation overlay texture and apply to VR
+        if self._vr_ocr_overlay and self._vr_ocr_overlay.is_initialized:
+            try:
+                # Get crop region pixel size from OCR engine for texture dimensions
+                crop = self._ocr_engine._crop_region if self._ocr_engine else None
+                if crop:
+                    # Use a reasonable render size (match capture region proportions)
+                    render_w = max(256, int(crop.get('w', 0.5) * 1920))
+                    render_h = max(128, int(crop.get('h', 0.15) * 1080))
+                else:
+                    render_w, render_h = 960, 270
+
+                texture = render_translation_texture(
+                    ocr_results, translations, (render_w, render_h)
+                )
+                self._vr_ocr_overlay.update_translation_texture(texture)
+                logger.debug(f"[ocr] VR translation texture applied: {render_w}x{render_h}")
+            except Exception as e:
+                logger.error(f"[ocr] Failed to render VR translation texture: {e}")
+
+        # Broadcast to frontend
+        if self._loop:
+            payload = {
+                'blocks': [
+                    {'original': text, 'translated': trans, 'confidence': conf}
+                    for (bbox, text, conf), trans in zip(ocr_results, translations)
+                ],
+                'count': len(translations),
+            }
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast(create_event(EventType.OCR_RESULT, payload)),
+                self._loop
+            )
+
+    def _on_ocr_status_change(self, status: dict):
+        """Handle OCR status change — broadcast to frontend."""
+        logger.debug(f"[ocr] Status change: {status}")
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast(create_event(EventType.OCR_STATUS, status)),
+                self._loop
+            )
+
+    async def _ocr_translate_text(self, text: str) -> str:
+        """Translate text using the active translation provider (for OCR).
+
+        Uses the same translation pipeline as speech translation.
+        """
+        if not text or not text.strip():
+            return text
+
+        # Get active translation pair
+        translation_settings = self.settings.get('translation', {})
+        pairs = translation_settings.get('language_pairs', [])
+        active_idx = translation_settings.get('active_pair_index', 0)
+
+        if not pairs:
+            return text
+
+        if isinstance(active_idx, int) and active_idx < len(pairs):
+            pair = pairs[active_idx]
+        else:
+            pair = pairs[0]
+
+        source = pair.get('source', 'eng_Latn')
+        target = pair.get('target', 'jpn_Jpan')
+
+        # Try translation providers in order
+        translated = await self._try_translate(text, source, target)
+        return translated if translated else text
+
+    async def _try_translate(self, text: str, source: str, target: str) -> Optional[str]:
+        """Try translating with available providers."""
+        provider = self.settings.get('translation', {}).get('provider', 'free')
+
+        # Try local NLLB first
+        if provider == 'local' and self._translator and self._translator.is_loaded:
+            try:
+                result = self._translator.translate(text, source, target)
+                if result:
+                    return result
+            except Exception as e:
+                logger.warning(f"[ocr] Local translation failed: {e}")
+
+        # Try free provider
+        if self._free_translator:
+            try:
+                result = await self._free_translator.translate(text, source, target)
+                if result:
+                    return result
+            except Exception as e:
+                logger.warning(f"[ocr] Free translation failed: {e}")
+
+        # Try cloud provider
+        if self._cloud_translator:
+            try:
+                result = await self._cloud_translator.translate(text, source, target)
+                if result:
+                    return result
+            except Exception as e:
+                logger.warning(f"[ocr] Cloud translation failed: {e}")
+
+        return None
+
+    async def ocr_initialize(self, languages: list = None, device: str = None):
+        """Initialize the OCR engine with languages derived from translation pairs."""
+        if not self._ocr_engine:
+            return False
+
+        ocr_settings = self.settings.get('ocr', {})
+        dev = device or ocr_settings.get('device', 'cpu')
+
+        if languages:
+            langs = languages
+        else:
+            # Derive from all translation pairs
+            langs = self._get_ocr_languages_from_pairs()
+
+        logger.info(f"[ocr] Initializing OCR: languages={langs}, device={dev}")
+        return await self._ocr_engine.initialize(langs, dev)
+
+    def _get_ocr_languages_from_pairs(self) -> list:
+        """Extract OCR languages from all translation pair targets + active source."""
+        translation_settings = self.settings.get('translation', {})
+        pairs = translation_settings.get('language_pairs', [])
+
+        if not pairs:
+            return ['en']
+
+        nllb_codes = set()
+        for pair in pairs:
+            target = pair.get('target', '')
+            if target:
+                nllb_codes.add(target)
+
+        # Also add source of active pair (user speaks this language, OCR should detect it too)
+        active_idx = translation_settings.get('active_pair_index', 0)
+        if isinstance(active_idx, int) and active_idx < len(pairs):
+            source = pairs[active_idx].get('source', '')
+            if source:
+                nllb_codes.add(source)
+
+        # Convert NLLB codes to EasyOCR codes
+        ocr_langs = []
+        for code in nllb_codes:
+            easyocr_code = NLLB_TO_EASYOCR.get(code)
+            if easyocr_code and easyocr_code not in ocr_langs:
+                ocr_langs.append(easyocr_code)
+
+        logger.info(f"[ocr] Derived OCR languages from translation pairs: {ocr_langs}")
+        return ocr_langs if ocr_langs else ['en']
+
+    async def ocr_capture(self) -> Optional[dict]:
+        """Trigger a manual OCR capture."""
+        if not self._ocr_engine:
+            logger.warning("[ocr] OCR engine not available")
+            return None
+
+        if not self._ocr_engine.is_loaded:
+            # Check if easyocr is installed before trying to initialize
+            try:
+                import importlib
+                importlib.import_module('easyocr')
+            except ImportError:
+                logger.warning("[ocr] EasyOCR not installed — cannot capture")
+                await self.broadcast(create_event(EventType.OCR_ERROR, {
+                    'error': 'OCR feature not installed. Go to Settings → Install Features to install it.'
+                }))
+                return None
+            # Auto-initialize on first capture
+            success = await self.ocr_initialize()
+            if not success:
+                await self.broadcast(create_event(EventType.OCR_ERROR, {
+                    'error': 'Failed to load OCR model. Install the OCR feature first.'
+                }))
+                return None
+
+        result = await self._ocr_engine.trigger_manual_capture()
+        return result
+
+    async def ocr_start_auto(self):
+        """Start automatic OCR capture loop."""
+        if not self._ocr_engine:
+            return
+
+        if not self._ocr_engine.is_loaded:
+            # Check if easyocr is installed before trying to initialize
+            try:
+                import importlib
+                importlib.import_module('easyocr')
+            except ImportError:
+                logger.warning("[ocr] EasyOCR not installed — cannot start auto capture")
+                await self.broadcast(create_event(EventType.OCR_ERROR, {
+                    'error': 'OCR feature not installed. Go to Settings → Install Features to install it.'
+                }))
+                return
+            success = await self.ocr_initialize()
+            if not success:
+                await self.broadcast(create_event(EventType.OCR_ERROR, {
+                    'error': 'Failed to load OCR model for auto capture.'
+                }))
+                return
+
+        if self._ocr_engine._loop_task and not self._ocr_engine._loop_task.done():
+            return  # Already running
+
+        self._ocr_engine._loop_task = asyncio.create_task(
+            self._ocr_engine.start_auto_loop()
+        )
+
+    def ocr_stop_auto(self):
+        """Stop automatic OCR capture loop."""
+        if self._ocr_engine:
+            self._ocr_engine.stop_auto_loop()
+
+    # ── VR OCR Overlay Callbacks ──────────────────────────────────────
+
+    def _on_vr_ocr_capture(self):
+        """Called when VR camera button or controller binding triggers OCR capture."""
+        logger.info("[ocr] VR capture triggered")
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(self.ocr_capture(), self._loop)
+
+    def _on_vr_ocr_region_toggle(self, visible: bool):
+        """Called when VR cyan button toggles region visibility."""
+        logger.info(f"[ocr] VR region toggled: visible={visible}")
+        # Update crop region from VR position → pixel fractions
+        if visible and self._vr_ocr_overlay:
+            crop = self._vr_ocr_overlay.get_crop_region_pixels()
+            if crop and self._ocr_engine:
+                self._ocr_engine._crop_region = crop
+                logger.debug(f"[ocr] Crop region updated from VR: {crop}")
+
+        # Broadcast region state to frontend
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast(create_event(EventType.OCR_STATUS, {
+                    'region_visible': visible,
+                })),
+                self._loop
+            )
+
+    def _on_vr_ocr_region_changed(self, region_pos: dict):
+        """Called when VR region is moved/resized (drag in VR)."""
+        logger.debug(f"[ocr] VR region changed: {region_pos}")
+        # Update crop region pixels
+        if self._vr_ocr_overlay:
+            crop = self._vr_ocr_overlay.get_crop_region_pixels()
+            if crop and self._ocr_engine:
+                self._ocr_engine._crop_region = crop
+
+        # Broadcast to frontend for canvas sync
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast(create_event(EventType.OCR_STATUS, {
+                    'region_updated': region_pos,
+                })),
+                self._loop
+            )

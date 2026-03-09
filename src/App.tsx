@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Settings, Mic, Languages, Volume2, Bot, Headphones, SmilePlus, ArrowLeftRight, Plus, X, AudioLines, Music, Speech, Trash2, Power } from 'lucide-react'
+import { Settings, Mic, Languages, Volume2, Bot, Headphones, SmilePlus, ArrowLeftRight, Plus, X, AudioLines, Music, Speech, Trash2, Power, ScanText } from 'lucide-react'
 import { ChatView } from '@/components/chat/ChatView'
 import { SettingsView } from '@/components/settings/SettingsView'
 import { ToastContainer } from '@/components/Toast'
@@ -84,6 +84,8 @@ function MenuBar({ settings, menuPosition, menuAlignment, isListening, isSpeaker
 
       <ToggleControl icon={<Languages className="w-4 h-4" />} label="Trans" enabled={settings.translation.enabled} disabled={!connected}
         onClick={() => { const v = !settings.translation.enabled; console.log('[App] Toggle Translation', v); settings.updateTranslation({ enabled: v }); updateSettings({ translation: { enabled: v } }) }} />
+      <ToggleControl icon={<ScanText className="w-4 h-4" />} label="VRT" enabled={settings.ocr.enabled} disabled={!connected}
+        onClick={() => { const v = !settings.ocr.enabled; console.log('[App] Toggle VRT', v); settings.updateOCR({ enabled: v }); updateSettings({ ocr: { enabled: v } }) }} />
       <ToggleControl icon={<Headphones className="w-4 h-4" />} label="Listen" enabled={isSpeakerListening} disabled={!connected}
         onClick={() => { console.log('[App] Toggle Speaker Capture', { wasSpeakerListening: isSpeakerListening }); if (isSpeakerListening) stopSpeakerCapture(); else startSpeakerCapture() }} />
 

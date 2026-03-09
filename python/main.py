@@ -366,6 +366,36 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
             except Exception as e:
                 await websocket.send(json.dumps({'type': 'cache_info', 'payload': {'error': str(e)}}))
 
+        # ── OCR Messages ──
+        elif msg_type == 'ocr_capture':
+            logger.info("[ws] ocr_capture: manual trigger")
+            if engine:
+                result = await engine.ocr_capture()
+                if result:
+                    await websocket.send(json.dumps(create_event(EventType.OCR_RESULT, result)))
+
+        elif msg_type == 'ocr_start_auto':
+            logger.info("[ws] ocr_start_auto")
+            if engine:
+                await engine.ocr_start_auto()
+
+        elif msg_type == 'ocr_stop_auto':
+            logger.info("[ws] ocr_stop_auto")
+            if engine:
+                engine.ocr_stop_auto()
+
+        elif msg_type == 'ocr_initialize':
+            logger.info(f"[ws] ocr_initialize: languages={payload.get('languages')} device={payload.get('device')}")
+            if engine:
+                success = await engine.ocr_initialize(
+                    languages=payload.get('languages'),
+                    device=payload.get('device'),
+                )
+                await websocket.send(json.dumps(create_event(EventType.OCR_STATUS, {
+                    'loaded': success,
+                    'loading': False,
+                })))
+
         elif msg_type == 'shutdown':
             # Graceful shutdown requested from frontend
             logger.info("Shutdown requested from frontend")

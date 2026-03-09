@@ -73,6 +73,7 @@ interface VROverlaySettings {
   showTranslatedText: boolean
   showAIResponses: boolean
   showListenText: boolean
+  showOCRText: boolean
   // Notification panel
   notificationEnabled: boolean
   notificationTracking: 'none' | 'left_hand' | 'right_hand'  // hand attachment
@@ -123,6 +124,31 @@ export interface RVCSettings {
   recentModels: Array<{ name: string; path: string; indexPath: string | null; sizeMb: number }>
 }
 
+export interface OCRSettings {
+  enabled: boolean
+  device: ComputeDevice
+  mode: 'manual' | 'automatic'
+  interval: number
+  controllerBindingEnabled: boolean
+  captureBinding: string[]
+  toggleBinding: string[]
+  confidence: number
+  captureRegion: {
+    x: number
+    y: number
+    width: number
+    height: number
+    distance: number
+  }
+  ocrButton: {
+    x: number
+    y: number
+    width: number
+    distance: number
+    tracking: 'none' | 'left_hand' | 'right_hand'
+  }
+}
+
 interface VRChatSettings {
   oscEnabled: boolean
   oscIP: string
@@ -155,6 +181,7 @@ export interface Settings {
   ai: AIAssistantSettings
   rvc: RVCSettings
   vrOverlay: VROverlaySettings
+  ocr: OCRSettings
   vrchat: VRChatSettings
   outputProfiles: OutputProfile[]
   menuPosition: 'right' | 'top' | 'left' | 'bottom'
@@ -170,6 +197,7 @@ interface SettingsStore extends Settings {
   updateAI: (settings: Partial<AIAssistantSettings>) => void
   updateRVC: (settings: Partial<RVCSettings>) => void
   updateVROverlay: (settings: Partial<VROverlaySettings>) => void
+  updateOCR: (settings: Partial<OCRSettings>) => void
   updateVRChat: (settings: Partial<VRChatSettings>) => void
   addLanguagePair: (sourceLanguage: string, targetLanguage: string) => void
   removeLanguagePair: (id: string) => void
@@ -261,12 +289,25 @@ const defaultSettings: Settings = {
     rvcAvailableDevices: ['cpu'],
     recentModels: [],
   },
+  ocr: {
+    enabled: false,
+    device: 'cpu' as ComputeDevice,
+    mode: 'manual' as const,
+    interval: 3,
+    controllerBindingEnabled: false,
+    captureBinding: ['right_grip'],
+    toggleBinding: ['left_grip', 'left_a'],
+    confidence: 0.3,
+    captureRegion: { x: 0, y: -0.1, width: 0.5, height: 0.15, distance: 1.5 },
+    ocrButton: { x: 0.25, y: -0.3, width: 0.06, distance: 1.5, tracking: 'none' as const },
+  },
   vrOverlay: {
     enabled: false,
     showOriginalText: true,
     showTranslatedText: true,
     showAIResponses: true,
     showListenText: true,
+    showOCRText: true,
     // Notification panel
     notificationEnabled: true,
     notificationTracking: 'none',
@@ -342,6 +383,8 @@ export const useSettingsStore = create<SettingsStore>()(
         set((state) => ({ rvc: { ...state.rvc, ...settings } })),
       updateVROverlay: (settings) =>
         set((state) => ({ vrOverlay: { ...state.vrOverlay, ...settings } })),
+      updateOCR: (settings) =>
+        set((state) => ({ ocr: { ...state.ocr, ...settings } })),
       updateVRChat: (settings) =>
         set((state) => ({ vrchat: { ...state.vrchat, ...settings } })),
       addLanguagePair: (sourceLanguage, targetLanguage) =>
@@ -614,9 +657,23 @@ export const useSettingsStore = create<SettingsStore>()(
           }
         }
 
+        // v8 -> v9: Add OCR settings
+        if (version < 9) {
+          if (!state?.ocr) {
+            state.ocr = defaultSettings.ocr
+          }
+        }
+
+        // v9 -> v10: Add showOCRText to VR overlay settings
+        if (version < 10) {
+          if (state?.vrOverlay && (state.vrOverlay as Record<string, unknown>).showOCRText === undefined) {
+            (state.vrOverlay as Record<string, unknown>).showOCRText = true
+          }
+        }
+
         return state
       },
-      version: 8,
+      version: 10,
     }
   )
 )

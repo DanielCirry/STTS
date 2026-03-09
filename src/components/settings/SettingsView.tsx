@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { ArrowLeft, Home, Cpu, Volume2, Bot, Monitor, Headphones, Key, Languages, Check, Loader2, Play, Square, Wifi, WifiOff, Mic, MicOff, RefreshCw, Activity, AlertCircle, Eye, RotateCcw, Trash2, AudioLines, Download, FolderOpen, X, Plus, Send } from 'lucide-react'
+import { ArrowLeft, Home, Cpu, Volume2, Bot, Monitor, Headphones, Key, Languages, Check, Loader2, Play, Square, Wifi, WifiOff, Mic, MicOff, RefreshCw, Activity, AlertCircle, Eye, RotateCcw, Trash2, AudioLines, Download, FolderOpen, X, Plus, Send, ScanText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Select } from '@/components/ui/select'
@@ -422,7 +422,7 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
 
       {/* Row 6b: AI Model — submenu for cloud model or local model name */}
       {settings.ai.provider !== 'local' && CLOUD_MODELS[settings.ai.provider] && (
-        <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4">
+        <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4 min-h-[40px]">
           <span className="text-xs text-muted-foreground">Model</span>
           <select
             value={settings.ai.cloudModels?.[settings.ai.provider] || CLOUD_MODELS[settings.ai.provider][0]?.value}
@@ -441,13 +441,27 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
         </div>
       )}
       {settings.ai.provider === 'local' && (
-        <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4">
+        <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4 min-h-[40px]">
           <span className="text-xs text-muted-foreground">Model</span>
-          <span className="text-xs truncate max-w-[200px]">
-            {settings.ai.localModel
-              ? settings.ai.localModel.replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || settings.ai.localModel
-              : 'None loaded'}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs truncate max-w-[160px]">
+              {settings.ai.localModel
+                ? settings.ai.localModel.replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || settings.ai.localModel
+                : 'None loaded'}
+            </span>
+            {settings.ai.localModel && (
+              <button
+                onClick={() => {
+                  console.log('[Settings] Quick unload LLM')
+                  sendMessage({ type: 'unload_llm' })
+                }}
+                className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-secondary hover:bg-destructive/20 hover:text-destructive transition-colors border border-border shrink-0"
+                title="Unload model"
+              >
+                Unload
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -514,6 +528,88 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
           >
             TTS
           </button>
+        </div>
+      </div>
+
+      {/* Row 8: VR Translation */}
+      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
+        <div className="flex items-center gap-2">
+          <ScanText className="w-4 h-4 text-muted-foreground" />
+          <span className="text-sm">VRT</span>
+          <Switch
+            checked={settings.ocr.enabled}
+            onCheckedChange={(v) => {
+              console.log('[Settings] VRT quick toggle', v)
+              settings.updateOCR({ enabled: v })
+              sendMessage({ type: 'update_settings', payload: { ocr: { enabled: v } } })
+            }}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <DeviceToggle
+            device={settings.ocr.device}
+            onChange={(d) => {
+              console.log('[Settings] VRT device change', d)
+              settings.updateOCR({ device: d })
+              sendMessage({ type: 'update_settings', payload: { ocr: { device: d } } })
+            }}
+          />
+          <div className="flex items-center gap-0.5 bg-secondary/60 rounded p-0.5">
+            <button
+              onClick={() => {
+                console.log('[Settings] VRT mode → Manual')
+                settings.updateOCR({ mode: 'manual' })
+                sendMessage({ type: 'update_settings', payload: { ocr: { mode: 'manual' } } })
+              }}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                settings.ocr.mode === 'manual'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'hover:bg-secondary/80 text-muted-foreground'
+              }`}
+            >
+              Manual
+            </button>
+            <button
+              onClick={() => {
+                console.log('[Settings] VRT mode → Auto')
+                settings.updateOCR({ mode: 'automatic' })
+                sendMessage({ type: 'update_settings', payload: { ocr: { mode: 'automatic' } } })
+              }}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                settings.ocr.mode === 'automatic'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'hover:bg-secondary/80 text-muted-foreground'
+              }`}
+            >
+              Auto
+            </button>
+          </div>
+        </div>
+      </div>
+      {/* VRT Interval */}
+      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4">
+        <span className="text-xs text-muted-foreground">Interval</span>
+        <div className="flex items-center gap-1">
+          {[1, 2, 3, 5, 10].map(s => (
+            <button
+              key={s}
+              disabled={settings.ocr.mode !== 'automatic'}
+              onClick={() => {
+                console.log('[Settings] VRT interval change', s)
+                settings.updateOCR({ interval: s })
+                sendMessage({ type: 'update_settings', payload: { ocr: { interval: s } } })
+              }}
+              className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                settings.ocr.mode !== 'automatic'
+                  ? 'opacity-40 cursor-not-allowed bg-secondary text-muted-foreground'
+                  : settings.ocr.interval === s
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary hover:bg-secondary/80 text-muted-foreground'
+              }`}
+            >
+              {s}s
+            </button>
+          ))}
         </div>
       </div>
     </div>
@@ -2024,14 +2120,23 @@ function AISettings() {
               </button>
             </div>
             <div className="space-y-2">
-              {/* No models warning */}
+              {/* No models warning / loading state */}
               {localModels.filter(m => m.downloaded).length === 0 && (
-                <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-4 text-sm">
-                  <p className="font-medium text-yellow-500 mb-1">No Models Found</p>
-                  <p className="text-muted-foreground text-xs">
-                    Download a .gguf model from the links below, or use Browse to select one from your computer.
-                  </p>
-                </div>
+                ai.localModel ? (
+                  <div className="rounded-lg bg-secondary/50 border border-border p-4 text-sm">
+                    <p className="font-medium text-muted-foreground mb-1">Loading model list...</p>
+                    <p className="text-muted-foreground text-xs">
+                      Loading a local LLM can take 10-30 seconds depending on model size.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-4 text-sm">
+                    <p className="font-medium text-yellow-500 mb-1">No Models Found</p>
+                    <p className="text-muted-foreground text-xs">
+                      Download a .gguf model from the links below, or use Browse to select one from your computer.
+                    </p>
+                  </div>
+                )
               )}
 
               {/* Downloaded model cards — same style as RVC cards */}
@@ -2256,12 +2361,12 @@ function AISettings() {
 }
 
 function OverlaySettings() {
-  const { vrOverlay, updateVROverlay } = useSettingsStore()
-  const { updateSettings, status } = useBackend()
+  const { vrOverlay, updateVROverlay, ocr, updateOCR, translation } = useSettingsStore()
+  const { updateSettings, sendMessage, status } = useBackend()
   const canvasRef = useRef<HTMLDivElement>(null)
   const [interaction, setInteraction] = useState<{
     type: 'drag' | 'resize'
-    element: 'notification' | 'log'
+    element: 'notification' | 'log' | 'ocrButton' | 'ocrRegion'
     corner?: 'tl' | 'tr' | 'bl' | 'br'
     startMouseX: number
     startMouseY: number
@@ -2327,38 +2432,76 @@ function OverlaySettings() {
         const canvasXPct = (e.clientX - rect.left) / rect.width
         const canvasYPct = (e.clientY - rect.top) / rect.height
         const tracking = getSnapTracking(canvasXPct, canvasYPct)
-        const trackingKey = interaction.element === 'notification' ? 'notificationTracking' : 'messageLogTracking'
-        if (interaction.element === 'notification') {
-          handleUpdate({ notificationX: Math.round(newX * 100) / 100, notificationY: Math.round(newY * 100) / 100, [trackingKey]: tracking })
+
+        if (interaction.element === 'ocrButton') {
+          // OCR button: update ocr settings
+          const ocrTracking = tracking
+          const updated = { ocrButton: { ...ocr.ocrButton, x: Math.round(newX * 100) / 100, y: Math.round(newY * 100) / 100, tracking: ocrTracking } }
+          console.log('[Settings] OCR button drag', updated)
+          updateOCR(updated)
+          updateSettings({ ocr: updated })
+        } else if (interaction.element === 'ocrRegion') {
+          const updated = { captureRegion: { ...ocr.captureRegion, x: Math.round(newX * 100) / 100, y: Math.round(newY * 100) / 100 } }
+          console.log('[Settings] OCR region drag', updated)
+          updateOCR(updated)
+          updateSettings({ ocr: updated })
         } else {
-          handleUpdate({ messageLogX: Math.round(newX * 100) / 100, messageLogY: Math.round(newY * 100) / 100, [trackingKey]: tracking })
+          const trackingKey = interaction.element === 'notification' ? 'notificationTracking' : 'messageLogTracking'
+          if (interaction.element === 'notification') {
+            handleUpdate({ notificationX: Math.round(newX * 100) / 100, notificationY: Math.round(newY * 100) / 100, [trackingKey]: tracking })
+          } else {
+            handleUpdate({ messageLogX: Math.round(newX * 100) / 100, messageLogY: Math.round(newY * 100) / 100, [trackingKey]: tracking })
+          }
         }
       } else {
-        const isNotif = interaction.element === 'notification'
-        const maxW = isNotif ? NOTIF_MAX_W : LOG_MAX_W
-        const maxH = isNotif ? NOTIF_MAX_H : LOG_MAX_H
-        const minW = isNotif ? NOTIF_MIN_W : LOG_MIN_W
-        const minH = isNotif ? NOTIF_MIN_H : LOG_MIN_H
-        const c = interaction.corner || 'br'
-        // Sign of dx/dy contribution depends on which corner is being dragged
-        const dw = (c === 'tl' || c === 'bl') ? -dx : dx
-        const dh = (c === 'tl' || c === 'tr') ? dy : -dy
-        const newW = Math.max(minW, Math.min(maxW, interaction.startW + dw))
-        const newH = Math.max(minH, Math.min(maxH, interaction.startH + dh))
-        // Shift position to keep opposite corner fixed
-        const wDelta = newW - interaction.startW
-        const hDelta = newH - interaction.startH
-        const xShift = (c === 'tl' || c === 'bl') ? -wDelta / 2 : wDelta / 2
-        const yShift = (c === 'tl' || c === 'tr') ? hDelta / 2 : -hDelta / 2
-        const newX = Math.round((interaction.startX + xShift) * 100) / 100
-        const newY = Math.round((interaction.startY + yShift) * 100) / 100
-        const prefix = isNotif ? 'notification' : 'messageLog'
-        handleUpdate({
-          [`${prefix}Width`]: Math.round(newW * 100) / 100,
-          [`${prefix}Height`]: Math.round(newH * 100) / 100,
-          [`${prefix}X`]: newX,
-          [`${prefix}Y`]: newY,
-        })
+        // Resize
+        if (interaction.element === 'ocrButton') {
+          // OCR button resize: only width
+          const dw = (interaction.corner === 'tl' || interaction.corner === 'bl') ? -dx : dx
+          const newW = Math.max(0.03, Math.min(0.15, interaction.startW + dw))
+          const updated = { ocrButton: { ...ocr.ocrButton, width: Math.round(newW * 100) / 100 } }
+          updateOCR(updated)
+          updateSettings({ ocr: updated })
+        } else if (interaction.element === 'ocrRegion') {
+          const c = interaction.corner || 'br'
+          const dw = (c === 'tl' || c === 'bl') ? -dx : dx
+          const dh = (c === 'tl' || c === 'tr') ? dy : -dy
+          const newW = Math.max(0.1, Math.min(1.5, interaction.startW + dw))
+          const newH = Math.max(0.05, Math.min(1.0, interaction.startH + dh))
+          const wDelta = newW - interaction.startW
+          const hDelta = newH - interaction.startH
+          const xShift = (c === 'tl' || c === 'bl') ? -wDelta / 2 : wDelta / 2
+          const yShift = (c === 'tl' || c === 'tr') ? hDelta / 2 : -hDelta / 2
+          const newX = Math.round((interaction.startX + xShift) * 100) / 100
+          const newY = Math.round((interaction.startY + yShift) * 100) / 100
+          const updated = { captureRegion: { ...ocr.captureRegion, x: newX, y: newY, width: Math.round(newW * 100) / 100, height: Math.round(newH * 100) / 100 } }
+          updateOCR(updated)
+          updateSettings({ ocr: updated })
+        } else {
+          const isNotif = interaction.element === 'notification'
+          const maxW = isNotif ? NOTIF_MAX_W : LOG_MAX_W
+          const maxH = isNotif ? NOTIF_MAX_H : LOG_MAX_H
+          const minW = isNotif ? NOTIF_MIN_W : LOG_MIN_W
+          const minH = isNotif ? NOTIF_MIN_H : LOG_MIN_H
+          const c = interaction.corner || 'br'
+          const dw = (c === 'tl' || c === 'bl') ? -dx : dx
+          const dh = (c === 'tl' || c === 'tr') ? dy : -dy
+          const newW = Math.max(minW, Math.min(maxW, interaction.startW + dw))
+          const newH = Math.max(minH, Math.min(maxH, interaction.startH + dh))
+          const wDelta = newW - interaction.startW
+          const hDelta = newH - interaction.startH
+          const xShift = (c === 'tl' || c === 'bl') ? -wDelta / 2 : wDelta / 2
+          const yShift = (c === 'tl' || c === 'tr') ? hDelta / 2 : -hDelta / 2
+          const newX = Math.round((interaction.startX + xShift) * 100) / 100
+          const newY = Math.round((interaction.startY + yShift) * 100) / 100
+          const prefix = isNotif ? 'notification' : 'messageLog'
+          handleUpdate({
+            [`${prefix}Width`]: Math.round(newW * 100) / 100,
+            [`${prefix}Height`]: Math.round(newH * 100) / 100,
+            [`${prefix}X`]: newX,
+            [`${prefix}Y`]: newY,
+          })
+        }
       }
     }
 
@@ -2369,32 +2512,44 @@ function OverlaySettings() {
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [interaction, handleUpdate])
+  }, [interaction, handleUpdate, ocr, updateOCR, updateSettings])
 
-  const startDrag = (element: 'notification' | 'log', e: React.MouseEvent) => {
+  const startDrag = (element: 'notification' | 'log' | 'ocrButton' | 'ocrRegion', e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    const isNotif = element === 'notification'
+    let startX = 0, startY = 0
+    if (element === 'notification') { startX = vrOverlay.notificationX; startY = vrOverlay.notificationY }
+    else if (element === 'log') { startX = vrOverlay.messageLogX; startY = vrOverlay.messageLogY }
+    else if (element === 'ocrButton') { startX = ocr.ocrButton.x; startY = ocr.ocrButton.y }
+    else if (element === 'ocrRegion') { startX = ocr.captureRegion.x; startY = ocr.captureRegion.y }
     setInteraction({
       type: 'drag', element,
       startMouseX: e.clientX, startMouseY: e.clientY,
-      startX: isNotif ? vrOverlay.notificationX : vrOverlay.messageLogX,
-      startY: isNotif ? vrOverlay.notificationY : vrOverlay.messageLogY,
-      startW: 0, startH: 0,
+      startX, startY, startW: 0, startH: 0,
     })
   }
 
-  const startResize = (element: 'notification' | 'log', corner: 'tl' | 'tr' | 'bl' | 'br', e: React.MouseEvent) => {
+  const startResize = (element: 'notification' | 'log' | 'ocrButton' | 'ocrRegion', corner: 'tl' | 'tr' | 'bl' | 'br', e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    const isNotif = element === 'notification'
+    let startX = 0, startY = 0, startW = 0, startH = 0
+    if (element === 'notification') {
+      startX = vrOverlay.notificationX; startY = vrOverlay.notificationY
+      startW = vrOverlay.notificationWidth; startH = vrOverlay.notificationHeight
+    } else if (element === 'log') {
+      startX = vrOverlay.messageLogX; startY = vrOverlay.messageLogY
+      startW = vrOverlay.messageLogWidth; startH = vrOverlay.messageLogHeight
+    } else if (element === 'ocrButton') {
+      startX = ocr.ocrButton.x; startY = ocr.ocrButton.y
+      startW = ocr.ocrButton.width; startH = ocr.ocrButton.width // Square
+    } else if (element === 'ocrRegion') {
+      startX = ocr.captureRegion.x; startY = ocr.captureRegion.y
+      startW = ocr.captureRegion.width; startH = ocr.captureRegion.height
+    }
     setInteraction({
       type: 'resize', element, corner,
       startMouseX: e.clientX, startMouseY: e.clientY,
-      startX: isNotif ? vrOverlay.notificationX : vrOverlay.messageLogX,
-      startY: isNotif ? vrOverlay.notificationY : vrOverlay.messageLogY,
-      startW: isNotif ? vrOverlay.notificationWidth : vrOverlay.messageLogWidth,
-      startH: isNotif ? vrOverlay.notificationHeight : vrOverlay.messageLogHeight,
+      startX, startY, startW, startH,
     })
   }
 
@@ -2402,7 +2557,7 @@ function OverlaySettings() {
     console.log('[Settings] VR Overlay reset defaults')
     const defaults: Record<string, unknown> = {
       showOriginalText: true, showTranslatedText: true,
-      showAIResponses: true, showListenText: true,
+      showAIResponses: true, showListenText: true, showOCRText: true,
       notificationEnabled: true, notificationTracking: 'none',
       notificationX: 0, notificationY: -0.3,
       notificationWidth: 0.4, notificationHeight: 0.15,
@@ -2475,8 +2630,8 @@ function OverlaySettings() {
   )
 
   // Any item on a hand?
-  const anyOnLeftHand = vrOverlay.notificationTracking === 'left_hand' || vrOverlay.messageLogTracking === 'left_hand'
-  const anyOnRightHand = vrOverlay.notificationTracking === 'right_hand' || vrOverlay.messageLogTracking === 'right_hand'
+  const anyOnLeftHand = vrOverlay.notificationTracking === 'left_hand' || vrOverlay.messageLogTracking === 'left_hand' || ocr.ocrButton.tracking === 'left_hand'
+  const anyOnRightHand = vrOverlay.notificationTracking === 'right_hand' || vrOverlay.messageLogTracking === 'right_hand' || ocr.ocrButton.tracking === 'right_hand'
 
   return (
     <div className="p-4 space-y-6">
@@ -2590,6 +2745,48 @@ function OverlaySettings() {
               </div>
             )
           })()}
+
+          {/* OCR Capture Region (white/light gray) */}
+          {ocr.enabled && (
+            <div
+              className="absolute border-2 border-white/30 bg-white/10 cursor-move flex items-center justify-center"
+              style={{
+                left: `${toCanvasX(ocr.captureRegion.x) - toCanvasW(ocr.captureRegion.width) / 2}%`,
+                top: `${toCanvasY(ocr.captureRegion.y) - toCanvasH(ocr.captureRegion.height) / 2}%`,
+                width: `${toCanvasW(ocr.captureRegion.width)}%`,
+                height: `${toCanvasH(ocr.captureRegion.height)}%`,
+              }}
+              onMouseDown={(e) => startDrag('ocrRegion', e)}
+            >
+              <span className="text-[9px] text-white/40 pointer-events-none">VRT Region</span>
+              <div className="absolute left-0 top-0 w-2.5 h-2.5 cursor-nw-resize bg-cyan-400/60" onMouseDown={(e) => startResize('ocrRegion', 'tl', e)} />
+              <div className="absolute right-0 top-0 w-2.5 h-2.5 cursor-ne-resize bg-cyan-400/60" onMouseDown={(e) => startResize('ocrRegion', 'tr', e)} />
+              <div className="absolute left-0 bottom-0 w-2.5 h-2.5 cursor-sw-resize bg-cyan-400/60" onMouseDown={(e) => startResize('ocrRegion', 'bl', e)} />
+              <div className="absolute right-0 bottom-0 w-2.5 h-2.5 cursor-se-resize bg-cyan-400/60" onMouseDown={(e) => startResize('ocrRegion', 'br', e)} />
+            </div>
+          )}
+
+          {/* OCR Toggle Button (cyan) */}
+          {ocr.enabled && (() => {
+            const onHand = ocr.ocrButton.tracking !== 'none'
+            return (
+              <div
+                className={`absolute border-2 cursor-move flex items-center justify-center rounded ${
+                  onHand ? 'border-yellow-400 bg-yellow-500/20' : 'border-cyan-400 bg-cyan-500/20'
+                }`}
+                style={{
+                  left: `${toCanvasX(ocr.ocrButton.x) - toCanvasW(ocr.ocrButton.width) / 2}%`,
+                  top: `${toCanvasY(ocr.ocrButton.y) - toCanvasW(ocr.ocrButton.width) / 2}%`,
+                  width: `${toCanvasW(ocr.ocrButton.width)}%`,
+                  height: `${toCanvasW(ocr.ocrButton.width)}%`,
+                }}
+                onMouseDown={(e) => startDrag('ocrButton', e)}
+              >
+                <ScanText className="w-3 h-3 text-cyan-300 pointer-events-none" />
+                <div className="absolute right-0 bottom-0 w-2.5 h-2.5 cursor-se-resize bg-cyan-400/60" onMouseDown={(e) => startResize('ocrButton', 'br', e)} />
+              </div>
+            )
+          })()}
         </div>
       </div>
 
@@ -2663,6 +2860,242 @@ function OverlaySettings() {
             </div>
           )}
         </div>
+
+        {/* VR Translation */}
+        <div className="border border-border rounded-lg overflow-hidden col-span-2">
+          <div className="flex items-center justify-between p-2 bg-secondary/20">
+            <div className="flex items-center gap-1.5">
+              <div className="w-2 h-2 rounded-sm bg-cyan-400" />
+              <span className="text-xs font-medium">VR Translation</span>
+            </div>
+            <Switch checked={ocr.enabled}
+              onCheckedChange={(v) => {
+                console.log('[Settings] VRT overlay toggle', v)
+                updateOCR({ enabled: v })
+                sendMessage({ type: 'update_settings', payload: { ocr: { enabled: v } } })
+              }} />
+          </div>
+          {ocr.enabled && (
+            <div className="p-2.5 space-y-2.5 border-t border-border">
+              {/* Device & Mode */}
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">Device</Label>
+                <DeviceToggle
+                  device={ocr.device}
+                  onChange={(d) => {
+                    console.log('[Settings] VRT device', d)
+                    updateOCR({ device: d })
+                    sendMessage({ type: 'update_settings', payload: { ocr: { device: d } } })
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">Mode</Label>
+                <div className="flex items-center gap-0.5 bg-secondary/60 rounded p-0.5">
+                  <button
+                    onClick={() => {
+                      console.log('[Settings] VRT mode → Manual')
+                      updateOCR({ mode: 'manual' })
+                      sendMessage({ type: 'update_settings', payload: { ocr: { mode: 'manual' } } })
+                    }}
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                      ocr.mode === 'manual'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'hover:bg-secondary/80 text-muted-foreground'
+                    }`}
+                  >
+                    Manual
+                  </button>
+                  <button
+                    onClick={() => {
+                      console.log('[Settings] VRT mode → Auto')
+                      updateOCR({ mode: 'automatic' })
+                      sendMessage({ type: 'update_settings', payload: { ocr: { mode: 'automatic' } } })
+                    }}
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                      ocr.mode === 'automatic'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'hover:bg-secondary/80 text-muted-foreground'
+                    }`}
+                  >
+                    Auto
+                  </button>
+                </div>
+              </div>
+              {/* Interval */}
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">Interval</Label>
+                <div className="flex items-center gap-1">
+                  {[1, 2, 3, 5, 10].map(s => (
+                    <button
+                      key={s}
+                      disabled={ocr.mode !== 'automatic'}
+                      onClick={() => {
+                        console.log('[Settings] VRT interval', s)
+                        updateOCR({ interval: s })
+                        sendMessage({ type: 'update_settings', payload: { ocr: { interval: s } } })
+                      }}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                        ocr.mode !== 'automatic'
+                          ? 'opacity-40 cursor-not-allowed bg-secondary text-muted-foreground'
+                          : ocr.interval === s
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-secondary hover:bg-secondary/80 text-muted-foreground'
+                      }`}
+                    >
+                      {s}s
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {/* Confidence */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">Confidence</Label>
+                  <span className="text-[10px] text-muted-foreground font-mono">{ocr.confidence.toFixed(1)}</span>
+                </div>
+                <input type="range" min={0.1} max={0.9} step={0.1}
+                  value={ocr.confidence}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value)
+                    updateOCR({ confidence: v })
+                    sendMessage({ type: 'update_settings', payload: { ocr: { confidence: v } } })
+                  }}
+                  className="w-full accent-primary" />
+              </div>
+              {/* Manual capture button */}
+              {ocr.mode === 'manual' && (
+                <button
+                  onClick={() => {
+                    console.log('[Settings] VRT manual capture')
+                    sendMessage({ type: 'ocr_capture' })
+                  }}
+                  className="w-full flex items-center justify-center gap-1.5 p-1.5 rounded text-xs font-medium bg-secondary hover:bg-secondary/80 transition-colors border border-border"
+                >
+                  <ScanText className="w-3.5 h-3.5" />
+                  Capture Now
+                </button>
+              )}
+              {/* Languages info */}
+              <div className="text-[10px] text-muted-foreground bg-secondary/30 rounded p-2">
+                <p className="mb-1">Uses languages from your Translation settings:</p>
+                <p className="font-mono">
+                  {translation.languagePairs.length > 0
+                    ? translation.languagePairs.map(p => {
+                        const src = LANGUAGES.find(l => l.value === p.source)?.label || p.source
+                        const tgt = LANGUAGES.find(l => l.value === p.target)?.label || p.target
+                        return `${src} → ${tgt}`
+                      }).join(', ')
+                    : 'No language pairs configured'}
+                </p>
+              </div>
+              {/* Controller Bindings */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">Controller Bindings</Label>
+                  <Switch checked={ocr.controllerBindingEnabled}
+                    onCheckedChange={(v) => {
+                      console.log('[Settings] VRT controller bindings', v)
+                      updateOCR({ controllerBindingEnabled: v })
+                      sendMessage({ type: 'update_settings', payload: { ocr: { controllerBindingEnabled: v } } })
+                    }} />
+                </div>
+                {ocr.controllerBindingEnabled && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-muted-foreground">Capture</span>
+                      <div className="flex items-center gap-1">
+                        {ocr.captureBinding.map((btn, i) => (
+                          <select key={i} value={btn}
+                            onChange={(e) => {
+                              const newBinding = [...ocr.captureBinding]
+                              newBinding[i] = e.target.value
+                              console.log('[Settings] VRT capture binding', newBinding)
+                              updateOCR({ captureBinding: newBinding })
+                              sendMessage({ type: 'update_settings', payload: { ocr: { captureBinding: newBinding } } })
+                            }}
+                            className="bg-secondary border border-border rounded px-1 py-0.5 text-[10px]"
+                          >
+                            {['left_grip', 'left_trigger', 'left_a', 'left_b', 'left_trackpad',
+                              'right_grip', 'right_trigger', 'right_a', 'right_b', 'right_trackpad'].map(v => (
+                              <option key={v} value={v}>{v.replace('_', ' ')}</option>
+                            ))}
+                          </select>
+                        ))}
+                        <button
+                          onClick={() => {
+                            if (ocr.captureBinding.length < 3) {
+                              const newBinding = [...ocr.captureBinding, 'right_trigger']
+                              updateOCR({ captureBinding: newBinding })
+                              sendMessage({ type: 'update_settings', payload: { ocr: { captureBinding: newBinding } } })
+                            }
+                          }}
+                          className="px-1 py-0.5 rounded text-[10px] bg-secondary hover:bg-secondary/80 border border-border"
+                          title="Add button to combo"
+                        >+</button>
+                        {ocr.captureBinding.length > 1 && (
+                          <button
+                            onClick={() => {
+                              const newBinding = ocr.captureBinding.slice(0, -1)
+                              updateOCR({ captureBinding: newBinding })
+                              sendMessage({ type: 'update_settings', payload: { ocr: { captureBinding: newBinding } } })
+                            }}
+                            className="px-1 py-0.5 rounded text-[10px] bg-secondary hover:bg-secondary/80 border border-border"
+                            title="Remove last button"
+                          >-</button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-muted-foreground">Toggle</span>
+                      <div className="flex items-center gap-1">
+                        {ocr.toggleBinding.map((btn, i) => (
+                          <select key={i} value={btn}
+                            onChange={(e) => {
+                              const newBinding = [...ocr.toggleBinding]
+                              newBinding[i] = e.target.value
+                              console.log('[Settings] VRT toggle binding', newBinding)
+                              updateOCR({ toggleBinding: newBinding })
+                              sendMessage({ type: 'update_settings', payload: { ocr: { toggleBinding: newBinding } } })
+                            }}
+                            className="bg-secondary border border-border rounded px-1 py-0.5 text-[10px]"
+                          >
+                            {['left_grip', 'left_trigger', 'left_a', 'left_b', 'left_trackpad',
+                              'right_grip', 'right_trigger', 'right_a', 'right_b', 'right_trackpad'].map(v => (
+                              <option key={v} value={v}>{v.replace('_', ' ')}</option>
+                            ))}
+                          </select>
+                        ))}
+                        <button
+                          onClick={() => {
+                            if (ocr.toggleBinding.length < 3) {
+                              const newBinding = [...ocr.toggleBinding, 'left_trigger']
+                              updateOCR({ toggleBinding: newBinding })
+                              sendMessage({ type: 'update_settings', payload: { ocr: { toggleBinding: newBinding } } })
+                            }
+                          }}
+                          className="px-1 py-0.5 rounded text-[10px] bg-secondary hover:bg-secondary/80 border border-border"
+                          title="Add button to combo"
+                        >+</button>
+                        {ocr.toggleBinding.length > 1 && (
+                          <button
+                            onClick={() => {
+                              const newBinding = ocr.toggleBinding.slice(0, -1)
+                              updateOCR({ toggleBinding: newBinding })
+                              sendMessage({ type: 'update_settings', payload: { ocr: { toggleBinding: newBinding } } })
+                            }}
+                            className="px-1 py-0.5 rounded text-[10px] bg-secondary hover:bg-secondary/80 border border-border"
+                            title="Remove last button"
+                          >-</button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Divider */}
@@ -2680,6 +3113,7 @@ function OverlaySettings() {
             { key: 'showTranslatedText', label: 'Translated text', Icon: Languages },
             { key: 'showAIResponses', label: 'AI responses', Icon: Bot },
             { key: 'showListenText', label: 'Listen text', Icon: Headphones },
+            { key: 'showOCRText', label: 'VR Translation', Icon: ScanText },
           ].map(({ key, label, Icon }) => (
             <div key={key} className="flex items-center justify-between p-2 bg-secondary/20 rounded">
               <div className="flex items-center gap-1.5">
@@ -4329,3 +4763,4 @@ function VoiceConversionSettings() {
     </div>
   )
 }
+

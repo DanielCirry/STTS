@@ -46,6 +46,10 @@ miniaudio>=1.59
 # VOICEVOX Engine setup
 py7zr>=1.0.0
 
+# OCR
+easyocr>=1.6.0
+mss>=6.1.0
+
 # Utilities
 tqdm>=4.66.0
 huggingface-hub>=0.20.0

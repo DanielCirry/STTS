@@ -68,6 +68,13 @@ FEATURES = {
         'requires_torch': False,
         'description': 'Offline text-to-speech engine (~150 MB)',
     },
+    'ocr': {
+        'name': 'OCR Text Recognition',
+        'packages': ['easyocr>=1.6.0', 'mss>=6.1.0'],
+        'check_import': 'easyocr',
+        'requires_torch': True,
+        'description': 'Screen text recognition for in-game translation (~500 MB)',
+    },
 }
 
 

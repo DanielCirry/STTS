@@ -195,11 +195,24 @@ class Translator:
             logger.debug(f"[translate] Step 3: Using specified device: {device}")
         self.device = device
 
-        # Step 4: Load tokenizer
+        # Step 4: Load tokenizer (retry once on corruption by clearing cache)
         try:
             logger.debug(f"[translate] Step 4: Loading tokenizer for {hf_name}...")
             self.tokenizer = AutoTokenizer.from_pretrained(hf_name)
             logger.debug(f"[translate] Step 4: Tokenizer loaded. Vocab size: {self.tokenizer.vocab_size}")
+        except (OSError, ValueError, RuntimeError) as e:
+            # Likely corrupted/incomplete download — clear cache and retry once
+            logger.warning(f"[translate] Step 4: Tokenizer load failed, attempting cache repair: {e}")
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(hf_name, force_download=True)
+                logger.info(f"[translate] Step 4: Tokenizer loaded after re-download. Vocab size: {self.tokenizer.vocab_size}")
+            except Exception as retry_e:
+                self.last_error = f"Failed to load tokenizer (even after re-download): {type(retry_e).__name__}: {retry_e}"
+                logger.error(f"[translate] {self.last_error}")
+                logger.error(f"[translate] Tokenizer traceback:\n{traceback.format_exc()}")
+                self.tokenizer = None
+                self.model = None
+                return False
         except Exception as e:
             self.last_error = f"Failed to load tokenizer: {type(e).__name__}: {e}"
             logger.error(f"[translate] {self.last_error}")
@@ -222,6 +235,23 @@ class Translator:
             logger.info(f"[translate] Step 5: Model loaded! {model_name} ({param_count:,} params) on {device}")
             return True
 
+        except (OSError, ValueError, RuntimeError) as e:
+            # Likely corrupted weights — retry with force download
+            logger.warning(f"[translate] Step 5: Model load failed, attempting re-download: {e}")
+            try:
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(hf_name, force_download=True, **kwargs)
+                self.model = self.model.to(device)
+                self.model_name = model_name
+                param_count = sum(p.numel() for p in self.model.parameters())
+                logger.info(f"[translate] Step 5: Model loaded after re-download! {model_name} ({param_count:,} params) on {device}")
+                return True
+            except Exception as retry_e:
+                self.last_error = f"Failed to load model weights (even after re-download): {type(retry_e).__name__}: {retry_e}"
+                logger.error(f"[translate] {self.last_error}")
+                logger.error(f"[translate] Model load traceback:\n{traceback.format_exc()}")
+                self.model = None
+                self.tokenizer = None
+                return False
         except Exception as e:
             self.last_error = f"Failed to load model weights: {type(e).__name__}: {e}"
             logger.error(f"[translate] {self.last_error}")
