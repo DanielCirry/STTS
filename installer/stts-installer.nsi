@@ -104,15 +104,24 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
-    ; Kill running processes
+    ; Kill running processes (STTS and VOICEVOX engine)
     nsExec::ExecToLog 'taskkill /IM STTS.exe /F'
+    nsExec::ExecToLog 'taskkill /IM run.exe /F'
 
-    ; Remove files
+    ; Remove known files
     Delete "$INSTDIR\STTS.exe"
     Delete "$INSTDIR\install-features.bat"
     Delete "$INSTDIR\uninstall.exe"
+    Delete "$INSTDIR\crash.log"
+
+    ; Remove all subdirectories (includes _internal, dist, venv, python, __pycache__, etc.)
     RMDir /r "$INSTDIR\_internal"
+    RMDir /r "$INSTDIR\dist"
     RMDir /r "$INSTDIR\venv"
+    RMDir /r "$INSTDIR\python"
+
+    ; Remove install directory and any remaining files
+    RMDir /r "$INSTDIR"
 
     ; Remove shortcuts
     Delete "$DESKTOP\${APPNAME}.lnk"
@@ -121,8 +130,8 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\${APPNAME}\Uninstall.lnk"
     RMDir "$SMPROGRAMS\${APPNAME}"
 
-    ; Remove install directory (if empty)
-    RMDir "$INSTDIR"
+    ; Remove user data (models, VOICEVOX, cache, logs) in %APPDATA%\STTS
+    RMDir /r "$APPDATA\STTS"
 
     ; Remove registry
     DeleteRegKey HKCU "${UNINSTKEY}"

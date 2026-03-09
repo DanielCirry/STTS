@@ -12,8 +12,8 @@ Real-time speech translation and communication tool for VRChat and general use.
 ## Quick Start
 
 1. Download and run `STTS-Setup.exe`
-2. Launch STTS — a setup wizard guides you through microphone, models, and integrations
-3. You'll be taken to **Install Features** to download speech recognition, translation, etc.
+2. Launch STTS and go to **Settings > Install Features** to download speech recognition, translation, etc.
+3. Configure your microphone and audio devices in **Settings > Audio**
 4. Click the microphone button and start talking
 
 ---

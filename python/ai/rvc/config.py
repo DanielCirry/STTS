@@ -38,6 +38,7 @@ def safe_import_torch():
         if hasattr(t, 'autograd'):
             return t
         # Partially initialized — clean up and retry
+        logger.debug("Cleaning up partially initialized torch from sys.modules")
         _cleanup_torch_modules()
 
     # Set up DLL directories if running as frozen exe
@@ -48,6 +49,15 @@ def safe_import_torch():
         except ImportError:
             pass
 
+    # Quick check: is torch even installed?
+    from pathlib import Path
+    if getattr(sys, 'frozen', False):
+        site_pkgs = Path(sys.executable).parent / 'venv' / 'Lib' / 'site-packages'
+        torch_dir = site_pkgs / 'torch'
+        if not torch_dir.exists():
+            logger.debug(f"torch not installed (no {torch_dir})")
+            return None
+
     try:
         import torch
         # Verify it's fully initialized
@@ -55,16 +65,28 @@ def safe_import_torch():
             raise ImportError("torch partially initialized (no autograd)")
         return torch
     except Exception as e:
-        logger.warning(f"Failed to import torch: {e}")
+        # Log the full error including DLL details to help debug
+        import traceback
+        full_err = traceback.format_exc()
+        logger.warning(f"torch import failed: {e}")
+        logger.info(f"torch import traceback:\n{full_err}")
         _cleanup_torch_modules()
         return None
 
 
 def _cleanup_torch_modules():
     """Remove all torch-related modules from sys.modules."""
-    to_remove = [k for k in sys.modules if k == 'torch' or k.startswith('torch.')]
+    to_remove = [k for k in sys.modules
+                 if k == 'torch' or k.startswith('torch.')
+                 or k.startswith('functorch')]
     for k in to_remove:
         del sys.modules[k]
+    # Also clear importlib caches so Python retries DLL loads
+    try:
+        import importlib
+        importlib.invalidate_caches()
+    except Exception:
+        pass
 
 
 def _ensure_init():

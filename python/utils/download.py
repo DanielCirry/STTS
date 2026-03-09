@@ -113,7 +113,105 @@ def patch_transformers_download_progress(model_id: str, on_progress: Callable[[s
     def progress_context():
         """Monkey-patch huggingface_hub's tqdm to capture progress."""
         original_tqdm = None
+        original_tqdm_auto = None
+        original_tqdm_std = None
         last_report_time = [0.0]
+        _progress_lock = threading.Lock()
+
+        class ProgressTqdm:
+            """Wrapper that reports progress to our callback.
+
+            Must implement enough of the tqdm API that libraries like
+            faster-whisper, transformers, and huggingface_hub don't crash.
+            """
+            _lock = _progress_lock  # Class-level _lock attribute (tqdm compat)
+            monitor_interval = 0
+            monitor = None
+
+            def __init__(self, *args, **kwargs):
+                self.total = kwargs.get('total', 0) or 0
+                self.n = 0
+                self.desc = kwargs.get('desc', '')
+                self.disable = kwargs.get('disable', False)
+                self.unit = kwargs.get('unit', 'it')
+                self.lock = _progress_lock
+                self.pos = 0
+                self.miniters = 1
+                self.last_print_t = 0
+                self.sp = None
+
+            def update(self, n=1):
+                self.n += n
+                now = time.time()
+                if now - last_report_time[0] >= 0.5 and self.total > 0:
+                    pct = (self.n / self.total) * 100
+                    on_progress(model_id, pct)
+                    last_report_time[0] = now
+
+            def close(self):
+                if self.total > 0:
+                    on_progress(model_id, 100.0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                raise StopIteration
+
+            def set_description(self, desc=None, refresh=True):
+                if desc:
+                    self.desc = desc
+
+            def set_postfix(self, *args, **kwargs):
+                pass
+
+            def refresh(self):
+                pass
+
+            def reset(self, total=None):
+                self.n = 0
+                if total is not None:
+                    self.total = total
+
+            def clear(self):
+                pass
+
+            def display(self, *args, **kwargs):
+                pass
+
+            @classmethod
+            def get_lock(cls):
+                return _progress_lock
+
+            @classmethod
+            def set_lock(cls, lock):
+                cls._lock = lock
+                nonlocal _progress_lock
+                _progress_lock = lock
+
+            @classmethod
+            def external_write_mode(cls, *args, **kwargs):
+                return contextlib.nullcontext()
+
+            @classmethod
+            def pandas(cls, *args, **kwargs):
+                return cls(*args, **kwargs)
+
+            def unpause(self):
+                pass
+
+            def moveto(self, n=0):
+                pass
+
+            @property
+            def format_dict(self):
+                return {'n': self.n, 'total': self.total, 'elapsed': 0, 'rate': None}
 
         try:
             # Try to patch huggingface_hub's file download progress
@@ -122,52 +220,24 @@ def patch_transformers_download_progress(model_id: str, on_progress: Callable[[s
             if hasattr(hf_download, 'tqdm'):
                 original_tqdm = hf_download.tqdm
 
-            class ProgressTqdm:
-                """Wrapper that reports progress to our callback."""
-                def __init__(self, *args, **kwargs):
-                    self.total = kwargs.get('total', 0) or 0
-                    self.n = 0
-                    self.desc = kwargs.get('desc', '')
-                    # Don't actually create a tqdm bar (we're headless)
-
-                def update(self, n=1):
-                    self.n += n
-                    now = time.time()
-                    # Throttle progress reports to max 2x/second
-                    if now - last_report_time[0] >= 0.5 and self.total > 0:
-                        pct = (self.n / self.total) * 100
-                        on_progress(model_id, pct)
-                        last_report_time[0] = now
-
-                def close(self):
-                    if self.total > 0:
-                        on_progress(model_id, 100.0)
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *args):
-                    self.close()
-
-                # Make it iterable (some code wraps iterables with tqdm)
-                def __iter__(self):
-                    return self
-
-                def __next__(self):
-                    raise StopIteration
-
-                def set_description(self, desc=None, refresh=True):
-                    if desc:
-                        self.desc = desc
-
-                def set_postfix(self, *args, **kwargs):
-                    pass
-
-                def refresh(self):
-                    pass
-
-            # Apply patch
+            # Apply patch to huggingface_hub's file_download
             hf_download.tqdm = lambda *a, **kw: ProgressTqdm(*a, **kw)
+
+            # Also patch tqdm.auto which newer huggingface_hub versions may use directly
+            try:
+                import tqdm.auto as tqdm_auto
+                original_tqdm_auto = tqdm_auto.tqdm
+                tqdm_auto.tqdm = ProgressTqdm
+            except (ImportError, AttributeError):
+                pass
+
+            # Also patch tqdm.std for broader coverage (faster-whisper uses this)
+            try:
+                import tqdm.std as tqdm_std
+                original_tqdm_std = tqdm_std.tqdm
+                tqdm_std.tqdm = ProgressTqdm
+            except (ImportError, AttributeError):
+                pass
 
             yield
 
@@ -175,11 +245,23 @@ def patch_transformers_download_progress(model_id: str, on_progress: Callable[[s
             logger.debug("huggingface_hub not available for progress patching")
             yield
         finally:
-            # Restore original
+            # Restore originals
             if original_tqdm is not None:
                 try:
                     import huggingface_hub.file_download as hf_download
                     hf_download.tqdm = original_tqdm
+                except Exception:
+                    pass
+            if original_tqdm_auto is not None:
+                try:
+                    import tqdm.auto as tqdm_auto
+                    tqdm_auto.tqdm = original_tqdm_auto
+                except Exception:
+                    pass
+            if original_tqdm_std is not None:
+                try:
+                    import tqdm.std as tqdm_std
+                    tqdm_std.tqdm = original_tqdm_std
                 except Exception:
                     pass
 

@@ -85,6 +85,13 @@ class SpeechToText:
             if device is None or device == 'auto':
                 device, _ = self.detect_device()
 
+            # Validate CUDA availability — fall back to CPU if not available
+            if device == 'cuda':
+                _, cuda_ok = self.detect_device()
+                if not cuda_ok:
+                    logger.warning("CUDA requested but not available, falling back to CPU")
+                    device = 'cpu'
+
             self.device = device
 
             # Set compute type based on device

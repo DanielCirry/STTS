@@ -16,6 +16,7 @@ class EventType(str, Enum):
     # Audio
     AUDIO_DEVICES = 'audio_devices'
     AUDIO_LEVEL = 'audio_level'
+    SPEAKER_TEST_DONE = 'speaker_test_done'
 
     # Listening
     LISTENING_STARTED = 'listening_started'

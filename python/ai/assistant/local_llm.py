@@ -14,23 +14,35 @@ logger = logging.getLogger('stts.assistant.local')
 
 # Recommended local models for VRChat companion use
 RECOMMENDED_MODELS = {
-    'llama-3.2-1B-Instruct': {
+    'Llama-3.2-1B-Instruct-Q4_K_M': {
         'url': 'https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF',
         'filename': 'Llama-3.2-1B-Instruct-Q4_K_M.gguf',
         'size': '~0.8 GB',
-        'description': 'Fast, good for simple queries'
+        'description': 'Fastest, good for simple queries'
     },
-    'llama-3.2-3B-Instruct': {
+    'Llama-3.2-3B-Instruct-Q4_K_M': {
         'url': 'https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF',
         'filename': 'Llama-3.2-3B-Instruct-Q4_K_M.gguf',
         'size': '~2 GB',
         'description': 'Balanced speed and quality'
     },
-    'Phi-3-mini-4k-instruct': {
+    'Phi-3-mini-4k-instruct-q4': {
         'url': 'https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf',
         'filename': 'Phi-3-mini-4k-instruct-q4.gguf',
         'size': '~2.3 GB',
         'description': 'Microsoft Phi-3, excellent reasoning'
+    },
+    'Mistral-7B-Instruct-v0.3-Q4_K_M': {
+        'url': 'https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF',
+        'filename': 'Mistral-7B-Instruct-v0.3-Q4_K_M.gguf',
+        'size': '~4.4 GB',
+        'description': 'Strong 7B model, great conversations'
+    },
+    'gemma-2-2b-it-Q4_K_M': {
+        'url': 'https://huggingface.co/bartowski/gemma-2-2b-it-GGUF',
+        'filename': 'gemma-2-2b-it-Q4_K_M.gguf',
+        'size': '~1.6 GB',
+        'description': 'Google Gemma 2, compact and capable'
     },
 }
 
@@ -51,8 +63,13 @@ class LocalLLMProvider(AIProvider):
         # Model paths
         if models_dir is None:
             import os
-            appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
-            models_dir = Path(appdata) / 'STTS' / 'models' / 'llm'
+            # Use Documents/STTS/Models — easy for users to find
+            docs = Path(os.path.expanduser('~/Documents'))
+            if docs.exists():
+                models_dir = docs / 'STTS' / 'Models'
+            else:
+                appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+                models_dir = Path(appdata) / 'STTS' / 'models' / 'llm'
 
         self._models_dir = models_dir
         self._models_dir.mkdir(parents=True, exist_ok=True)
@@ -60,6 +77,7 @@ class LocalLLMProvider(AIProvider):
         # LLM instance
         self._llm = None
         self._current_model: Optional[str] = None
+        self._current_model_path: Optional[Path] = None
         self._n_ctx = 2048
         self._n_gpu_layers = -1  # Auto-detect, use all GPU layers
 
@@ -95,6 +113,7 @@ class LocalLLMProvider(AIProvider):
             )
 
             self._current_model = Path(model_path).name
+            self._current_model_path = Path(model_path)
             self._n_ctx = n_ctx
             self._n_gpu_layers = n_gpu_layers
             self.is_loaded = True
@@ -104,15 +123,16 @@ class LocalLLMProvider(AIProvider):
 
         except ImportError:
             logger.error("llama-cpp-python not installed")
-            return False
+            raise ImportError("llama-cpp-python is not installed. Install it from the Features page first.")
         except Exception as e:
             logger.error(f"Error loading local LLM: {e}")
-            return False
+            raise
 
     def unload_model(self):
         """Unload the current model."""
         self._llm = None
         self._current_model = None
+        self._current_model_path = None
         self.is_loaded = False
         logger.info("Local LLM unloaded")
 
@@ -237,8 +257,11 @@ class LocalLLMProvider(AIProvider):
                 })
 
         # Add recommended models that aren't downloaded
+        # Match by name (stem) case-insensitively to hide already-downloaded ones
+        downloaded_names = {m['name'].lower() for m in models}
         for name, info in RECOMMENDED_MODELS.items():
-            if not any(m['name'] == name for m in models):
+            fname_stem = info['filename'].rsplit('.', 1)[0].lower() if 'filename' in info else name.lower()
+            if name.lower() not in downloaded_names and fname_stem not in downloaded_names:
                 models.append({
                     'name': name,
                     'url': info['url'],

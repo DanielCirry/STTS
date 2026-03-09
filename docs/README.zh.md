@@ -12,8 +12,8 @@
 ## 快速开始
 
 1. 下载并运行 `STTS-Setup.exe`
-2. 启动STTS — 设置向导引导你完成麦克风、模型和集成配置
-3. 进入 **Install Features** 下载语音识别、翻译等功能
+2. 启动STTS，进入 **Settings > Install Features** 下载语音识别、翻译等功能
+3. 在 **Settings > Audio** 中配置麦克风和音频设备
 4. 点击麦克风按钮开始说话
 
 ---

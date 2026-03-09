@@ -282,6 +282,7 @@ class AIAssistantManager:
 
         provider = self._providers['local']
         if isinstance(provider, LocalLLMProvider):
+            # Let exceptions propagate so error messages reach the frontend
             return provider.load_model(model_path)
         return False
 
@@ -366,6 +367,19 @@ class AIAssistantManager:
         if isinstance(provider, LocalLLMProvider):
             return provider.set_models_directory(path)
         return False
+
+    def get_llm_status(self) -> Dict:
+        """Get current local LLM status."""
+        if 'local' not in self._providers:
+            return {'loaded': False, 'model': None, 'model_path': None}
+        provider = self._providers['local']
+        if isinstance(provider, LocalLLMProvider):
+            return {
+                'loaded': provider.is_loaded,
+                'model': provider.current_model,
+                'model_path': str(provider._current_model_path) if getattr(provider, '_current_model_path', None) else None,
+            }
+        return {'loaded': False, 'model': None, 'model_path': None}
 
     def get_local_models_directory(self) -> str:
         """Get the current local models directory.

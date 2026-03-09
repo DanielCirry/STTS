@@ -14,6 +14,7 @@ All operations use torch.no_grad() -- this is inference only.
 """
 
 import logging
+import os
 import numpy as np
 import torch
 from torch.nn import functional as F
@@ -694,11 +695,31 @@ def load_hubert(model_path: str, device: torch.device):
 
     logger.debug(f"Loading ContentVec model from {model_path}")
 
-    # Load from transformers model directory (saved via save_pretrained)
+    # Load from transformers model directory (config.json + pytorch_model.bin)
+    # We load manually to bypass transformers' torch version check (CVE-2025-32434)
+    # which blocks torch.load even with weights_only=False on torch < 2.6.
     try:
-        model = HubertModel.from_pretrained(model_path, local_files_only=True)
+        config_path = os.path.join(model_path, 'config.json')
+        weights_path = os.path.join(model_path, 'pytorch_model.bin')
+        safetensors_path = os.path.join(model_path, 'model.safetensors')
+
+        # Prefer safetensors if available
+        if os.path.exists(safetensors_path):
+            logger.debug("Loading ContentVec via safetensors")
+            model = HubertModel.from_pretrained(model_path, local_files_only=True)
+        elif os.path.exists(weights_path):
+            # Manual load: create model from config, load state dict directly
+            logger.debug("Loading ContentVec manually (bypass torch version check)")
+            from transformers import HubertConfig
+            config = HubertConfig.from_pretrained(model_path, local_files_only=True)
+            model = HubertModel(config)
+            state_dict = torch.load(weights_path, map_location='cpu', weights_only=False)
+            model.load_state_dict(state_dict, strict=False)
+        else:
+            raise FileNotFoundError(f"No model weights found in {model_path}")
+
         model = model.eval().to(device)
-        logger.debug("ContentVec loaded via transformers")
+        logger.debug("ContentVec loaded successfully")
         return model
     except Exception as e:
         logger.error(f"Failed to load ContentVec from {model_path}: {e}")

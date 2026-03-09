@@ -111,12 +111,9 @@ export function StatusBar({ connected, audioLevel = 0, detectedLanguage, speaker
 
       <div className="h-3 w-px bg-border shrink-0" />
 
-      {/* STT Model + Detected Language */}
+      {/* STT Model */}
       <span className="shrink-0">
         STT: {settings.stt.model.replace('whisper-', '')}
-        {detectedLabel && (
-          <span className="ml-1 text-primary font-medium">[{detectedLabel}]</span>
-        )}
       </span>
 
       {/* Translation pair */}

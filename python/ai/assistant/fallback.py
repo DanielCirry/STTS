@@ -87,7 +87,7 @@ class FallbackAIManager:
     """Wraps AIAssistantManager with automatic provider fallback."""
 
     DEFAULT_PRIORITY = ['free', 'local', 'groq', 'google', 'openai', 'anthropic']
-    CLOUD_TIMEOUT = 15.0            # Seconds per cloud provider attempt
+    CLOUD_TIMEOUT = 30.0            # Seconds per cloud provider attempt
     NETWORK_RETRY_INTERVAL = 60.0   # Seconds before retrying cloud after network loss
 
     FALLBACK_MESSAGES = [

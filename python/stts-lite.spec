@@ -94,7 +94,9 @@ hidden_imports = [
     'comtypes',
     'comtypes.client',
 
-    # --- Stdlib modules needed by torch/RVC/transformers at runtime ---
+    # --- Stdlib modules needed by torch/RVC/transformers/llama-cpp at runtime ---
+    'sqlite3',
+    '_sqlite3',
     'pickletools',
     'unittest',
     'unittest.mock',
@@ -102,9 +104,15 @@ hidden_imports = [
     'cProfile',
     'pstats',
     'profile',
+    'pdb',
+    'bdb',
     'shelve',
     'dbm',
     'dbm.dumb',
+    'tqdm',
+    'tqdm.auto',
+    'tqdm.contrib',
+    'tqdm.contrib.concurrent',
 
     # --- HTTP server for frontend ---
     'http.server',

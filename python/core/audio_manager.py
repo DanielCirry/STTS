@@ -355,17 +355,58 @@ class AudioManager:
                     if self.on_audio_data:
                         self.on_audio_data(audio_data)
 
-            self.mic_stream = sd.InputStream(
-                device=device_id,
-                channels=CHANNELS,
-                samplerate=SAMPLE_RATE,
-                blocksize=CHUNK_SIZE,
-                dtype=np.float32,
-                callback=audio_callback
-            )
-            self.mic_stream.start()
+            # Try 16kHz first (Whisper native), fall back to device default rate + resample
+            actual_rate = SAMPLE_RATE
+            actual_chunk = CHUNK_SIZE
+            self._mic_resample = False
+            self._mic_native_rate = SAMPLE_RATE
+
+            try:
+                self.mic_stream = sd.InputStream(
+                    device=device_id,
+                    channels=CHANNELS,
+                    samplerate=SAMPLE_RATE,
+                    blocksize=CHUNK_SIZE,
+                    dtype=np.float32,
+                    callback=audio_callback
+                )
+                self.mic_stream.start()
+            except sd.PortAudioError:
+                # Device doesn't support 16kHz — use its default rate
+                dev_info = sd.query_devices(device_id or sd.default.device[0])
+                native_rate = int(dev_info['default_samplerate'])
+                logger.info(f"Device doesn't support {SAMPLE_RATE}Hz, using native {native_rate}Hz with resampling")
+                actual_rate = native_rate
+                actual_chunk = int(native_rate * CHUNK_DURATION)
+                self._mic_resample = True
+                self._mic_native_rate = native_rate
+
+                # Wrap callback to resample from native rate to 16kHz
+                orig_callback = audio_callback
+                def resampling_callback(indata, frames, time, status):
+                    from scipy.signal import resample_poly
+                    from math import gcd
+                    audio = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+                    audio = audio.astype(np.float32)
+                    # Resample to 16kHz
+                    g = gcd(SAMPLE_RATE, native_rate)
+                    resampled = resample_poly(audio, SAMPLE_RATE // g, native_rate // g).astype(np.float32)
+                    # Build a fake indata array for the original callback
+                    fake_indata = resampled.reshape(-1, 1)
+                    orig_callback(fake_indata, len(resampled), time, status)
+
+                self.mic_stream = sd.InputStream(
+                    device=device_id,
+                    channels=CHANNELS,
+                    samplerate=actual_rate,
+                    blocksize=actual_chunk,
+                    dtype=np.float32,
+                    callback=resampling_callback
+                )
+                self.mic_stream.start()
+
             self.is_recording = True
-            logger.debug(f"Started microphone capture (device: {device_id or 'default'})")
+            logger.debug(f"Started microphone capture (device: {device_id or 'default'}, rate: {actual_rate}Hz, resample: {self._mic_resample})")
 
         except Exception as e:
             logger.error(f"Error starting microphone: {e}")

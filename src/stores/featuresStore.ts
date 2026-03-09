@@ -27,6 +27,7 @@ export interface FeatureInstallResult {
   feature?: string
   error?: string
   timestamp: number
+  restart_needed?: boolean
 }
 
 export interface FeatureUninstallResult {
@@ -40,6 +41,10 @@ interface FeaturesStore {
   status: FeaturesStatus | null
   setStatus: (status: FeaturesStatus) => void
 
+  // VOICEVOX engine install state (shared across components)
+  voicevoxInstalled: boolean | null
+  setVoicevoxInstalled: (installed: boolean | null) => void
+
   // Install/uninstall event state (replaces lastMessage pattern)
   installProgress: FeatureInstallProgress | null
   installResult: FeatureInstallResult | null
@@ -52,6 +57,9 @@ interface FeaturesStore {
 export const useFeaturesStore = create<FeaturesStore>()((set) => ({
   status: null,
   setStatus: (status) => set({ status }),
+
+  voicevoxInstalled: null,
+  setVoicevoxInstalled: (installed) => set({ voicevoxInstalled: installed }),
 
   installProgress: null,
   installResult: null,

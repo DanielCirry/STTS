@@ -5,7 +5,7 @@ import { useFeaturesStore } from '@/stores/featuresStore'
 const WS_URL = 'ws://127.0.0.1:9876'
 
 const PROVIDER_LABELS: Record<string, string> = {
-  MyMemory: 'MyMemory',
+  MyMemory: 'Online (Free)',
   LibreTranslate: 'LibreTranslate',
   Lingva: 'Lingva',
   deepl: 'DeepL',
@@ -166,15 +166,6 @@ function handleGlobalMessage(message: BackendMessage) {
           `Translation switched to ${providerLabel} (${previousLabel} unavailable)`,
           'warning'
         )
-      } else if (provider && !previous) {
-        // Recovery from total failure — previous was null (all failed), now one is back
-        // On initial startup, previous is also null — show nothing to avoid toast spam
-        // The backend sets previous=null only on recovery, so show a recovery toast
-        const providerLabel = PROVIDER_LABELS[provider] || provider
-        useNotificationStore.getState().addToast(
-          `Translation restored via ${providerLabel}`,
-          'warning'
-        )
       } else if (!provider) {
         // All providers exhausted — sticky error toast
         useNotificationStore.getState().addToast(
@@ -244,6 +235,14 @@ function handleGlobalMessage(message: BackendMessage) {
       } else {
         chatStore.setListening(false)
       }
+      break
+
+    case 'tts_started':
+      chatStore.setSpeaking(true)
+      break
+
+    case 'tts_finished':
+      chatStore.setSpeaking(false)
       break
 
     case 'model_loading':
@@ -325,9 +324,12 @@ function handleGlobalMessage(message: BackendMessage) {
       if (rvcLoaded !== undefined) {
         useChatStore.getState().setRvcModelLoaded(rvcLoaded)
       }
+      // Don't override frontend device from rvc_status — the frontend's saved
+      // setting is the source of truth (sent to backend on connect).
+      // Just log for diagnostics.
       const rvcDevice = payload.device as string | undefined
       if (rvcDevice) {
-        useSettingsStore.getState().updateRVC({ rvcDevice: rvcDevice as 'cpu' | 'cuda' | 'directml' })
+        console.log('[useBackend] rvc_status reports device:', rvcDevice, '(frontend has:', useSettingsStore.getState().rvc.rvcDevice, ')')
       }
       break
     }
@@ -425,11 +427,13 @@ function handleGlobalMessage(message: BackendMessage) {
       break
 
     case 'feature_install_result':
+      console.log('[useBackend] feature_install_result:', JSON.stringify(payload))
       useFeaturesStore.getState().setInstallResult({
         success: payload.success as boolean,
         feature: payload.feature as string | undefined,
         error: payload.error as string | undefined,
         timestamp: Date.now(),
+        restart_needed: payload.restart_needed as boolean | undefined,
       })
       break
 
@@ -440,6 +444,10 @@ function handleGlobalMessage(message: BackendMessage) {
         error: payload.error as string | undefined,
         timestamp: Date.now(),
       })
+      break
+
+    case 'voicevox_setup_status':
+      useFeaturesStore.getState().setVoicevoxInstalled(payload.installed as boolean)
       break
 
     default:
@@ -519,6 +527,9 @@ export function useBackend() {
         // Request initial status
         ws.send(JSON.stringify({ type: 'get_status' }))
         ws.send(JSON.stringify({ type: 'rvc_get_status' }))
+        ws.send(JSON.stringify({ type: 'get_features_status' }))
+        // Check VOICEVOX install status (fast local check, no network/icon fetch)
+        ws.send(JSON.stringify({ type: 'voicevox_check_install' }))
 
         // Resync frontend settings to backend (critical after backend restart)
         // Must use nested keys matching backend's settings dict structure
@@ -535,10 +546,12 @@ export function useBackend() {
               engine: settings.tts.engine,
               voice: settings.tts.voice,
               enabled: settings.tts.enabled,
+              device: settings.tts.device,
             },
             translation: {
               enabled: settings.translation.enabled,
               provider: settings.translation.provider,
+              device: settings.translation.device,
               language_pairs: settings.translation.languagePairs.map((p) => ({
                 source: p.sourceLanguage,
                 target: p.targetLanguage,
@@ -550,15 +563,31 @@ export function useBackend() {
               keyword: settings.ai.keyword,
               provider: settings.ai.provider,
               emoji_mode: settings.ai.emojiMode,
+              device: settings.ai.device,
+            },
+            audio: {
+              input_device: settings.audio.microphoneDeviceId ? parseInt(settings.audio.microphoneDeviceId) : null,
+              speaker_capture_device: settings.audio.speakerCaptureDeviceId ? parseInt(settings.audio.speakerCaptureDeviceId) : null,
+              vad_enabled: settings.audio.enableVAD,
+              vad_sensitivity: settings.audio.vadSensitivity,
             },
           }
         }))
+        // Also resync RVC device after restart
+        ws.send(JSON.stringify({
+          type: 'rvc_set_device',
+          payload: { device: settings.rvc.rvcDevice }
+        }))
       }
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         globalConnecting = false
         globalWs = null
         setGlobalConnected(false)
+        // 1001 = "going away" (normal close, e.g. page unload) — don't log as error
+        if (event.code !== 1001) {
+          console.debug('WebSocket closed:', event.code, event.reason)
+        }
         // Reset runtime state that depends on backend
         useChatStore.getState().setMicRvcActive(false)
         useChatStore.getState().setRvcModelLoaded(false)
@@ -582,6 +611,9 @@ export function useBackend() {
       ws.onmessage = (event) => {
         try {
           const message: BackendMessage = JSON.parse(event.data)
+          if (message.type !== 'audio_level') {
+            console.log('[WS] RECV', message.type, message.payload)
+          }
 
           // Handle global state updates ONCE at module level
           // (Zustand stores are singletons, so getState() always works)
@@ -617,11 +649,16 @@ export function useBackend() {
         break
 
       case 'tts_voices':
+      case 'voicevox_voices':
         if (payload.voices) {
           useChatStore.getState().setTtsVoices(
-            (payload.voices as { id: string; name: string }[]).slice(0, 50)
+            (payload.voices as { id: string; name: string; icon?: string }[]).slice(0, 50)
           )
         }
+        break
+
+      case 'app_restarting':
+        console.log('[WS] App is restarting:', payload.reason)
         break
 
       default:
@@ -641,8 +678,9 @@ export function useBackend() {
               'rvc_mic_started', 'rvc_mic_stopped', 'rvc_mic_error', 'rvc_available_devices',
               'voicevox_setup_status', 'voicevox_setup_progress', 'voicevox_engine_status',
               'vrchat_sent', 'vrchat_status', 'tts_started', 'tts_finished',
-              'tts_voices', 'tts_output_devices', 'audio_devices',
-              'features_status', 'feature_install_progress', 'feature_install_result', 'feature_uninstall_result'].includes(type)) {
+              'tts_voices', 'tts_output_devices', 'audio_devices', 'loopback_test_result',
+              'features_status', 'feature_install_progress', 'feature_install_result', 'feature_uninstall_result',
+              'test_osc_result'].includes(type)) {
           console.warn('Unknown message type:', type)
         }
         break
@@ -650,6 +688,7 @@ export function useBackend() {
   }, [])
 
   const send = useCallback((message: { type: string; payload?: Record<string, unknown> }) => {
+    console.log('[WS] SEND', message)
     if (globalWs?.readyState === WebSocket.OPEN) {
       globalWs.send(JSON.stringify(message))
     } else {
@@ -750,6 +789,18 @@ export function useBackend() {
     send({ type: 'get_models_directory' })
   }, [send])
 
+  const browseLLMFolder = useCallback(() => {
+    send({ type: 'browse_llm_folder' })
+  }, [send])
+
+  const browseLLMModel = useCallback(() => {
+    send({ type: 'browse_llm_model' })
+  }, [send])
+
+  const getLLMStatus = useCallback(() => {
+    send({ type: 'get_llm_status' })
+  }, [send])
+
   // Register message handler
   useEffect(() => {
     messageHandlers.add(handleMessage)
@@ -800,5 +851,8 @@ export function useBackend() {
     getAIProviders,
     setModelsDirectory,
     getModelsDirectory,
+    browseLLMFolder,
+    browseLLMModel,
+    getLLMStatus,
   }
 }

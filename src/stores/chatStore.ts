@@ -27,9 +27,10 @@ interface ChatStore {
   activeTranslationProvider: string | null
   activeAIProvider: string | null
   aiOfflineMode: boolean
-  ttsVoices: { id: string; name: string }[]
+  ttsVoices: { id: string; name: string; icon?: string }[]
   rvcBaseModelsNeeded: boolean
   rvcBaseModelsSizeMb: number
+  isSpeaking: boolean
   rvcDownloadProgress: { file: string; progress: number } | null
   addMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => void
   updateMessageTranslation: (originalText: string, translatedText: string) => void
@@ -46,8 +47,9 @@ interface ChatStore {
   setActiveTranslationProvider: (provider: string | null) => void
   setActiveAIProvider: (provider: string | null) => void
   setAIOfflineMode: (offline: boolean) => void
-  setTtsVoices: (voices: { id: string; name: string }[]) => void
+  setTtsVoices: (voices: { id: string; name: string; icon?: string }[]) => void
   setRvcBaseModelsNeeded: (needed: boolean, sizeMb?: number) => void
+  setSpeaking: (speaking: boolean) => void
   setRvcDownloadProgress: (progress: { file: string; progress: number } | null) => void
 }
 
@@ -69,6 +71,7 @@ export const useChatStore = create<ChatStore>()(
       ttsVoices: [],
       rvcBaseModelsNeeded: false,
       rvcBaseModelsSizeMb: 400,
+      isSpeaking: false,
       rvcDownloadProgress: null,
       addMessage: (message) =>
         set((state) => {
@@ -113,6 +116,7 @@ export const useChatStore = create<ChatStore>()(
       setAIOfflineMode: (offline) => set({ aiOfflineMode: offline }),
       setTtsVoices: (voices) => set({ ttsVoices: voices }),
       setRvcBaseModelsNeeded: (needed, sizeMb) => set({ rvcBaseModelsNeeded: needed, ...(sizeMb !== undefined ? { rvcBaseModelsSizeMb: sizeMb } : {}) }),
+      setSpeaking: (speaking) => set({ isSpeaking: speaking }),
       setRvcDownloadProgress: (progress) => set({ rvcDownloadProgress: progress }),
     }),
     {

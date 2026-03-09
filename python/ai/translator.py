@@ -186,6 +186,12 @@ class Translator:
             device, has_cuda = self.detect_device()
             logger.debug(f"[translate] Step 3: Auto-detected device: {device} (CUDA available: {has_cuda})")
         else:
+            # Validate CUDA availability — fall back to CPU if not available
+            if device == 'cuda':
+                _, cuda_ok = self.detect_device()
+                if not cuda_ok:
+                    logger.warning("[translate] CUDA requested but not available, falling back to CPU")
+                    device = 'cpu'
             logger.debug(f"[translate] Step 3: Using specified device: {device}")
         self.device = device
 
@@ -205,18 +211,11 @@ class Translator:
         # Step 5: Load model (use safetensors to avoid torch.load CVE-2025-32434)
         try:
             logger.debug(f"[translate] Step 5: Loading model {hf_name} on {device} (safetensors)...")
+            kwargs = {'use_safetensors': True}
             if device == 'cuda':
-                self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                    hf_name,
-                    torch_dtype=torch.float16,
-                    device_map='auto',
-                    use_safetensors=True
-                )
-            else:
-                self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                    hf_name,
-                    use_safetensors=True,
-                )
+                kwargs['dtype'] = torch.float16
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(hf_name, **kwargs)
+            self.model = self.model.to(device)
 
             self.model_name = model_name
             param_count = sum(p.numel() for p in self.model.parameters())

@@ -2,17 +2,16 @@ import { useState, useEffect, useRef } from 'react'
 import { Settings, Mic, Languages, Volume2, Bot, Headphones, SmilePlus, ArrowLeftRight, Plus, X, AudioLines, Music, Speech, Trash2, Power } from 'lucide-react'
 import { ChatView } from '@/components/chat/ChatView'
 import { SettingsView } from '@/components/settings/SettingsView'
-import { SetupWizard } from '@/components/wizard'
-import type { WizardData } from '@/components/wizard'
 import { ToastContainer } from '@/components/Toast'
 import { ReconnectBanner } from '@/components/ReconnectBanner'
 import { ModelErrorDialog } from '@/components/ModelErrorDialog'
 import { StatusBar } from '@/components/chat/StatusBar'
 import { useSettingsStore, useChatStore } from '@/stores'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { useFeaturesStore } from '@/stores/featuresStore'
 import { useBackend } from '@/hooks/useBackend'
 
-type View = 'chat' | 'settings' | 'wizard'
+type View = 'chat' | 'settings'
 
 const LANGUAGES = [
   { value: 'eng_Latn', label: 'English', short: 'ENG' },
@@ -77,21 +76,22 @@ function MenuBar({ settings, menuPosition, menuAlignment, isListening, isSpeaker
   return (
     <div className={containerClass}>
       <ToggleControl icon={<Mic className="w-4 h-4" />} label="STT" enabled={isListening} disabled={!connected}
-        onClick={() => { if (isListening) stopListening(); else startListening() }} />
+        onClick={() => { console.log('[App] Toggle STT', { wasListening: isListening }); if (isListening) stopListening(); else startListening() }} />
       <ToggleControl icon={<Volume2 className="w-4 h-4" />} label="TTS" enabled={settings.tts.enabled} disabled={!connected}
-        onClick={() => { const v = !settings.tts.enabled; settings.updateTTS({ enabled: v }); updateSettings({ tts: { enabled: v } }) }} />
+        onClick={() => { const v = !settings.tts.enabled; console.log('[App] Toggle TTS', v); settings.updateTTS({ enabled: v }); updateSettings({ tts: { enabled: v } }) }} />
 
       <div className={separatorClass} />
 
       <ToggleControl icon={<Languages className="w-4 h-4" />} label="Trans" enabled={settings.translation.enabled} disabled={!connected}
-        onClick={() => { const v = !settings.translation.enabled; settings.updateTranslation({ enabled: v }); updateSettings({ translation: { enabled: v } }) }} />
+        onClick={() => { const v = !settings.translation.enabled; console.log('[App] Toggle Translation', v); settings.updateTranslation({ enabled: v }); updateSettings({ translation: { enabled: v } }) }} />
       <ToggleControl icon={<Headphones className="w-4 h-4" />} label="Listen" enabled={isSpeakerListening} disabled={!connected}
-        onClick={() => { if (isSpeakerListening) stopSpeakerCapture(); else startSpeakerCapture() }} />
+        onClick={() => { console.log('[App] Toggle Speaker Capture', { wasSpeakerListening: isSpeakerListening }); if (isSpeakerListening) stopSpeakerCapture(); else startSpeakerCapture() }} />
 
       <div className={separatorClass} />
 
       <ToggleControl icon={<Bot className="w-4 h-4" />} label="AI" enabled={settings.ai.enabled} disabled={!connected}
         onClick={() => {
+          console.log('[App] Toggle AI', { wasEnabled: settings.ai.enabled, provider: settings.ai.provider })
           if (!settings.ai.enabled && settings.ai.provider === 'local' && !settings.ai.localModel) {
             useNotificationStore.getState().addToast('Configure your AI provider in Settings → AI Assistant', 'info')
             navigateToSettings('ai'); return
@@ -101,26 +101,27 @@ function MenuBar({ settings, menuPosition, menuAlignment, isListening, isSpeaker
         onDisabledClick={() => { useNotificationStore.getState().addToast('Connect to the backend first', 'info') }}
       />
       <ToggleControl icon={<Speech className="w-4 h-4" />} label="Speak" enabled={settings.ai.speakResponses} disabled={!connected}
-        onClick={() => { const v = !settings.ai.speakResponses; settings.updateAI({ speakResponses: v }); updateSettings({ ai: { speak_responses: v } }) }} />
+        onClick={() => { const v = !settings.ai.speakResponses; console.log('[App] Toggle Speak Responses', v); settings.updateAI({ speakResponses: v }); updateSettings({ ai: { speak_responses: v } }) }} />
       <ToggleControl icon={<SmilePlus className="w-4 h-4" />} label="Emoji" enabled={settings.ai.emojiMode} disabled={!connected}
-        onClick={() => { const v = !settings.ai.emojiMode; settings.updateAI({ emojiMode: v }); updateSettings({ ai: { emoji_mode: v } }) }} />
+        onClick={() => { const v = !settings.ai.emojiMode; console.log('[App] Toggle Emoji Mode', v); settings.updateAI({ emojiMode: v }); updateSettings({ ai: { emoji_mode: v } }) }} />
 
       <div className={separatorClass} />
 
       <ToggleControl icon={<AudioLines className="w-4 h-4" />} label="Mic→RVC" enabled={isMicRvcActive} disabled={!connected || !isRvcModelLoaded}
         onClick={() => {
+          console.log('[App] Toggle Mic→RVC', { wasActive: isMicRvcActive })
           if (isMicRvcActive) { useChatStore.getState().setMicRvcActive(false); sendMessage({ type: 'rvc_mic_stop' }) }
           else { useChatStore.getState().setMicRvcActive(true); sendMessage({ type: 'rvc_mic_start', payload: { output_device_id: settings.rvc.micRvcOutputDeviceId } }) }
         }} />
       <ToggleControl icon={<Music className="w-4 h-4" />} label="TTS→RVC" enabled={settings.rvc.enabled} disabled={!connected || !isRvcModelLoaded}
-        onClick={() => { const v = !settings.rvc.enabled; settings.updateRVC({ enabled: v }); sendMessage({ type: 'rvc_enable', payload: { enabled: v } }) }} />
+        onClick={() => { const v = !settings.rvc.enabled; console.log('[App] Toggle TTS→RVC', v); settings.updateRVC({ enabled: v }); sendMessage({ type: 'rvc_enable', payload: { enabled: v } }) }} />
 
       <div className={separatorClass} />
 
-      <button onClick={() => setCurrentView('settings')} className="p-3 rounded-lg hover:bg-secondary transition-colors" title="Settings">
+      <button onClick={() => { console.log('[App] Open Settings'); setCurrentView('settings') }} className="p-3 rounded-lg hover:bg-secondary transition-colors" title="Settings">
         <Settings className="w-5 h-5" />
       </button>
-      <button onClick={() => { sendMessage({ type: 'shutdown' }); setTimeout(() => window.close(), 500) }} className="p-3 rounded-lg hover:bg-red-500/20 transition-colors text-muted-foreground hover:text-red-400" title="Quit STTS">
+      <button onClick={() => { console.log('[App] Quit STTS'); sendMessage({ type: 'shutdown' }); setTimeout(() => window.close(), 500) }} className="p-3 rounded-lg hover:bg-red-500/20 transition-colors text-muted-foreground hover:text-red-400" title="Quit STTS">
         <Power className="w-5 h-5" />
       </button>
     </div>
@@ -142,6 +143,7 @@ function App() {
   // showEmojiPicker/toggleEmojiPicker removed - emoji mode is now a setting in settingsStore.ai.emojiMode
 
   const navigateToSettings = (page?: string) => {
+    console.log('[App] Navigate to settings', page || 'main')
     setSettingsPage(page)
     setCurrentView('settings')
   }
@@ -159,13 +161,18 @@ function App() {
     }
   }, [editingPairId])
 
-  // Check if first run (no settings saved)
+  // On first run (no features installed), go to Features page
+  const featuresStatus = useFeaturesStore(s => s.status)
+  const firstRunChecked = useRef(false)
   useEffect(() => {
-    const hasCompletedSetup = localStorage.getItem('stts_setup_complete')
-    if (!hasCompletedSetup) {
-      setCurrentView('wizard')
+    if (firstRunChecked.current) return
+    if (!featuresStatus?.features) return
+    firstRunChecked.current = true
+    const anyInstalled = Object.values(featuresStatus.features).some(f => f.installed)
+    if (!anyInstalled) {
+      navigateToSettings('features')
     }
-  }, [])
+  }, [featuresStatus])
 
   // Sync frontend settings to backend on initial connect only.
   // Individual setting controls send their own update_settings messages,
@@ -215,8 +222,18 @@ function App() {
   }, [connected, settings.translation.enabled, settings.translation.provider, settings.translation.model, loadModel])
 
   // Auto-load RVC model when connected and a model path is saved
+  // Only if RVC feature is actually installed (torch + rvc packages present)
   useEffect(() => {
     if (connected && settings.rvc.modelPath && !isRvcModelLoaded) {
+      const features = useFeaturesStore.getState().status?.features
+      const torchInstalled = features?.['torch_cpu']?.installed || features?.['torch_cuda']?.installed
+      const rvcInstalled = features?.['rvc']?.installed
+      if (!torchInstalled || !rvcInstalled) {
+        console.log('[App] Skipping RVC auto-load: torch=%s rvc=%s', torchInstalled, rvcInstalled)
+        // Clear stale model path since features aren't installed
+        settings.updateRVC({ modelPath: null, indexPath: null })
+        return
+      }
       sendMessage({
         type: 'rvc_load_model',
         payload: {
@@ -226,57 +243,6 @@ function App() {
       })
     }
   }, [connected]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleWizardComplete = (data: WizardData) => {
-    // Apply wizard settings to backend
-    updateSettings({
-      audio: {
-        input_device: data.inputDevice ? parseInt(data.inputDevice) : null,
-        output_device: data.outputDevice ? parseInt(data.outputDevice) : null,
-      },
-      stt: {
-        model: data.sttModel,
-      },
-      translation: {
-        enabled: data.translationEnabled,
-      },
-      tts: {
-        engine: data.ttsEngine,
-      },
-      vrchat: {
-        osc_enabled: data.vrchatEnabled,
-      },
-      vrOverlay: {
-        enabled: data.vrOverlayEnabled,
-      },
-    })
-
-    // Update local store
-    settings.updateTranslation({ enabled: data.translationEnabled })
-    settings.updateTTS({ enabled: true })
-
-    // Mark setup as complete
-    localStorage.setItem('stts_setup_complete', 'true')
-    // Navigate to features page so user can install required components
-    navigateToSettings('features')
-  }
-
-  const handleSkipWizard = () => {
-    localStorage.setItem('stts_setup_complete', 'true')
-    navigateToSettings('features')
-  }
-
-  // Show wizard if first run
-  if (currentView === 'wizard') {
-    return (
-      <div className="h-screen bg-background text-foreground">
-        <SetupWizard
-          onComplete={handleWizardComplete}
-          onSkip={handleSkipWizard}
-        />
-      </div>
-    )
-  }
 
   return (
     <>
@@ -324,8 +290,10 @@ function App() {
                       <button
                         onClick={() => {
                           if (isActive) {
+                            console.log('[App] Toggle language pair editor', pair.id)
                             setEditingPairId(editingPairId === pair.id ? null : pair.id)
                           } else {
+                            console.log('[App] Switch active language pair', idx)
                             settings.setActivePair(idx)
                             const pairs = useSettingsStore.getState().translation.languagePairs
                             updateSettings({ translation: { language_pairs: pairs.map(p => ({ source: p.sourceLanguage, target: p.targetLanguage })), active_pair_index: idx } })
@@ -357,7 +325,7 @@ function App() {
                   )
                 })}
                 <button
-                  onClick={() => { if (settings.translation.languagePairs.length < 5) setEditingPairId('new') }}
+                  onClick={() => { console.log('[App] Add language pair clicked'); if (settings.translation.languagePairs.length < 5) setEditingPairId('new') }}
                   className={`p-1 rounded transition-colors ${settings.translation.languagePairs.length < 5 ? 'text-zinc-500 hover:text-zinc-300 hover:bg-secondary cursor-pointer' : 'text-zinc-700 cursor-not-allowed'}`}
                   title={settings.translation.languagePairs.length < 5 ? 'Add language pair' : 'Maximum 5 pairs'}
                 >
@@ -391,7 +359,7 @@ function App() {
               </div>
               {useChatStore.getState().messages.length > 0 && (
                 <button
-                  onClick={() => useChatStore.getState().clearMessages()}
+                  onClick={() => { console.log('[App] Clear chat'); useChatStore.getState().clearMessages() }}
                   className="p-1.5 rounded text-muted-foreground hover:text-destructive transition-colors"
                   title="Clear chat"
                 >
@@ -419,7 +387,7 @@ function App() {
           {currentView === 'chat' ? (
             <ChatView />
           ) : (
-            <SettingsView onBack={() => { setSettingsPage(undefined); setCurrentView('chat') }} initialPage={settingsPage as any} />
+            <SettingsView onBack={() => { console.log('[App] Back to chat from settings'); setSettingsPage(undefined); setCurrentView('chat') }} initialPage={settingsPage as any} />
           )}
         </div>
 

@@ -350,22 +350,63 @@ class TTSManager:
             if self._stop_requested:
                 return
 
+            # Negotiate sample rate with output device — resample if needed
+            play_rate = sample_rate
+            try:
+                dev_info = sd.query_devices(self._output_device, 'output')
+                device_rate = int(dev_info['default_samplerate'])
+                # Check if the device supports our sample rate
+                try:
+                    sd.check_output_settings(device=self._output_device, samplerate=sample_rate)
+                except Exception:
+                    # Device doesn't support this rate — resample
+                    logger.debug(f"Device doesn't support {sample_rate}Hz, resampling to {device_rate}Hz")
+                    ratio = device_rate / sample_rate
+                    new_len = int(len(audio_array) * ratio)
+                    indices = np.linspace(0, len(audio_array) - 1, new_len).astype(np.float32)
+                    idx_floor = indices.astype(np.int32)
+                    idx_ceil = np.minimum(idx_floor + 1, len(audio_array) - 1)
+                    frac = indices - idx_floor
+                    audio_array = audio_array[idx_floor] * (1 - frac) + audio_array[idx_ceil] * frac
+                    play_rate = device_rate
+            except Exception as e:
+                logger.debug(f"Could not check device sample rate: {e}")
+
             # Play audio
-            duration_s = len(audio_array) / sample_rate
-            logger.debug(f"Playing audio: {len(audio_array)} samples at {sample_rate}Hz ({duration_s:.2f}s)")
+            duration_s = len(audio_array) / play_rate
+            logger.debug(f"Playing audio: {len(audio_array)} samples at {play_rate}Hz ({duration_s:.2f}s)")
 
             # Play to extra output devices (non-blocking, fire-and-forget)
             self._active_extra_streams = []
             for extra_dev in self._extra_output_devices:
                 try:
+                    # Check if extra device supports this rate, resample if needed
+                    extra_rate = play_rate
+                    extra_audio = audio_array
+                    try:
+                        sd.check_output_settings(device=extra_dev, samplerate=play_rate)
+                    except Exception:
+                        try:
+                            ed_info = sd.query_devices(extra_dev, 'output')
+                            extra_rate = int(ed_info['default_samplerate'])
+                            ratio = extra_rate / play_rate
+                            new_len = int(len(audio_array) * ratio)
+                            indices = np.linspace(0, len(audio_array) - 1, new_len).astype(np.float32)
+                            idx_floor = indices.astype(np.int32)
+                            idx_ceil = np.minimum(idx_floor + 1, len(audio_array) - 1)
+                            frac = indices - idx_floor
+                            extra_audio = audio_array[idx_floor] * (1 - frac) + audio_array[idx_ceil] * frac
+                        except Exception:
+                            pass
+
                     extra_stream = sd.OutputStream(
-                        samplerate=sample_rate,
+                        samplerate=extra_rate,
                         channels=1,
                         device=extra_dev,
                         dtype='float32',
                     )
                     extra_stream.start()
-                    extra_stream.write(audio_array.reshape(-1, 1))
+                    extra_stream.write(extra_audio.reshape(-1, 1))
                     self._active_extra_streams.append(extra_stream)
                 except Exception as e:
                     logger.warning(f"Failed to play to extra device {extra_dev}: {e}")
@@ -373,7 +414,7 @@ class TTSManager:
             # Play to primary device
             sd.play(
                 audio_array,
-                samplerate=sample_rate,
+                samplerate=play_rate,
                 device=self._output_device,
                 blocking=False
             )

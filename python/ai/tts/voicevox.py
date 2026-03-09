@@ -183,6 +183,8 @@ class VoicevoxEngine(TTSEngine):
             if cached and cached.get('icons'):
                 # Restore in-memory state
                 voices = []
+                icons = cached.get('icons', {})
+                voice_dicts = []
                 for v in cached['voices']:
                     voices.append(Voice(
                         id=v['id'], name=v['name'],
@@ -190,10 +192,15 @@ class VoicevoxEngine(TTSEngine):
                         gender=v.get('gender'),
                         description=v.get('description', ''),
                     ))
+                    # Include icon in returned dict so frontend gets images
+                    voice_dicts.append({
+                        **v,
+                        'icon': icons.get(str(v['id'])),
+                    })
                 self._voices_cache = voices
-                self._speaker_icons = cached.get('icons', {})
-                logger.debug(f"Loaded {len(voices)} VOICEVOX voices with icons from cache")
-                return cached['voices']
+                self._speaker_icons = icons
+                logger.debug(f"Loaded {len(voices)} VOICEVOX voices with {len(icons)} icons from cache")
+                return voice_dicts
         except Exception as e:
             logger.debug(f"No VOICEVOX cache available: {e}")
 

@@ -2,26 +2,32 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useBackend } from '@/hooks/useBackend'
 import { useFeaturesStore } from '@/stores/featuresStore'
 import { useSettingsStore } from '@/stores/settingsStore'
-import type { FeatureInstallProgress, FeatureInstallResult, FeatureUninstallResult } from '@/stores/featuresStore'
 
 const FEATURES = [
+  { id: 'torch_cpu', name: 'PyTorch', description: 'Required for STT, Translation & RVC. Switching CPU/CUDA will restart the app.', torchPick: true },
   { id: 'stt', name: 'Speech-to-Text (Whisper)', description: 'Local speech recognition (~300 MB)' },
-  { id: 'torch_cpu', name: 'PyTorch', description: 'Required for Translation & RVC', torchPick: true },
   { id: 'translation', name: 'Translation (NLLB)', description: 'Offline translation for 200+ languages (~50 MB)' },
   { id: 'local_llm', name: 'Local LLM (llama.cpp)', description: 'Run AI models locally (~50 MB)' },
-  { id: 'rvc', name: 'RVC Voice Conversion', description: 'Real-time voice conversion (~100 MB)' },
+  { id: 'rvc', name: 'RVC Voice Conversion', description: 'Real-time voice conversion + base models (~550 MB)' },
   { id: 'piper_tts', name: 'Piper TTS (Offline)', description: 'Offline text-to-speech engine (~150 MB)' },
 ]
 
-// Estimate progress from pip output keywords
+// Estimate progress from pip output keywords — parse real percentages when available
 function estimateProgress(detail: string): number {
   if (!detail) return 0.05
   const d = detail.toLowerCase()
+  // Try to parse real pip download percentage (e.g., "Downloading foo 45%", "45%|████")
+  const pctMatch = detail.match(/(\d{1,3})%/)
+  if (pctMatch) {
+    const pct = parseInt(pctMatch[1]) / 100
+    if (pct > 0 && pct <= 1) return pct
+  }
   if (d.includes('installing dependency') || d.includes('pytorch')) return 0.1
-  if (d.includes('collecting')) return 0.2
-  if (d.includes('downloading')) return 0.5
-  if (d.includes('installing')) return 0.75
-  if (d.includes('successfully')) return 1
+  if (d.includes('collecting')) return 0.15
+  if (d.includes('downloading')) return 0.4
+  if (d.includes('installing')) return 0.7
+  if (d.includes('successfully') || d.includes('complete')) return 1
+  if (d.includes('verifying')) return 0.9
   return 0.3
 }
 
@@ -55,6 +61,7 @@ export default function FeaturesManager() {
   const [progress, setProgress] = useState<Record<string, number>>(session.progress)
   const [results, setResults] = useState<Record<string, 'success' | 'error'>>(session.results)
   const [errorMsg, setErrorMsg] = useState<string | null>(session.errorMsg)
+  const [restartNeeded, setRestartNeeded] = useState(false)
   const activeRef = useRef(active)
   const queueRef = useRef(queue)
   const checkedRef = useRef(false)
@@ -66,8 +73,11 @@ export default function FeaturesManager() {
   const [vvSetupProgress, setVvSetupProgress] = useState<{ stage: string; progress: number; detail: string } | null>(vvSession.setupProgress)
   const [vvBuildType, setVvBuildType] = useState<'directml' | 'cpu'>(vvSession.buildType)
 
-  // Sync VOICEVOX session state
-  useEffect(() => { vvSession.installed = vvInstalled }, [vvInstalled])
+  // Sync VOICEVOX session state + global store
+  useEffect(() => {
+    vvSession.installed = vvInstalled
+    useFeaturesStore.getState().setVoicevoxInstalled(vvInstalled)
+  }, [vvInstalled])
   useEffect(() => { vvSession.engineRunning = vvEngineRunning }, [vvEngineRunning])
   useEffect(() => { vvSession.installPath = vvInstallPath }, [vvInstallPath])
   useEffect(() => { vvSession.setupProgress = vvSetupProgress }, [vvSetupProgress])
@@ -77,22 +87,34 @@ export default function FeaturesManager() {
   useEffect(() => {
     if (!connected) return
     sendMessage({ type: 'get_features_status' })
-    // If we had an active install but navigated away, re-check
+    // If we had an active install but navigated away, clear stale state
+    // The features_status response will set correct results
     if (session.active) {
-      const timer = setTimeout(() => {
-        if (activeRef.current && !queueRef.current.length) {
-          setActive(null)
-          session.active = null
-        }
-      }, 3000)
-      return () => clearTimeout(timer)
+      console.log('[Features] Clearing stale active state:', session.active)
+      setActive(null)
+      session.active = null
+      setQueue([])
+      session.queue = []
     }
   }, [connected, sendMessage])
 
-  // Check VOICEVOX install status on mount
+  // Check VOICEVOX install status on mount — also reset stale progress
   useEffect(() => {
     if (!connected) return
+    // Clear stale extracting/downloading progress on re-mount
+    // (backend will send fresh status via voicevox_setup_status)
+    if (vvSetupProgress && !vvSetupProgress.stage) {
+      setVvSetupProgress(null)
+    }
     sendMessage({ type: 'voicevox_check_install' })
+    // Timeout: if still null (checking) after 10s, assume not installed
+    const timeout = setTimeout(() => {
+      if (vvSession.installed === null) {
+        console.log('[Features] VOICEVOX check timed out, assuming not installed')
+        setVvInstalled(false)
+      }
+    }, 10000)
+    return () => clearTimeout(timeout)
   }, [connected, sendMessage])
 
   // Handle VOICEVOX backend messages
@@ -103,6 +125,8 @@ export default function FeaturesManager() {
       setVvInstalled(p.installed ?? false)
       setVvEngineRunning(p.engine_running ?? false)
       if (p.install_path) setVvInstallPath(p.install_path)
+      // Clear stale progress if backend says installed (navigated away during install)
+      if (p.installed) setVvSetupProgress(null)
     } else if (lastMessage.type === 'voicevox_setup_progress') {
       const p = lastMessage.payload as { stage?: string; progress?: number; detail?: string }
       if (p.stage === 'complete') {
@@ -112,9 +136,14 @@ export default function FeaturesManager() {
       } else if (p.stage === 'error') {
         setVvSetupProgress(null)
       } else {
+        // Map download (0-80%) + extract (80-100%) for continuous progress bar
+        const raw = p.progress || 0
+        const overall = p.stage === 'downloading' ? raw * 0.8
+          : p.stage === 'extracting' ? 80 + raw * 0.2
+          : raw
         setVvSetupProgress({
           stage: p.stage || '',
-          progress: p.progress || 0,
+          progress: overall,
           detail: p.detail || '',
         })
       }
@@ -127,18 +156,30 @@ export default function FeaturesManager() {
   // React to featuresStatus from Zustand store (set by handleGlobalMessage)
   useEffect(() => {
     if (!featuresStatus?.features) return
-    const newResults: Record<string, 'success' | 'error'> = { ...results }
+    const newResults: Record<string, 'success' | 'error'> = {}
+    // Sync results with backend truth — only mark 'success' if backend says installed
     for (const [fid, info] of Object.entries(featuresStatus.features)) {
-      if (info.installed && !newResults[fid]) {
+      if (info.installed) {
         newResults[fid] = 'success'
       }
     }
+    // Preserve any in-progress results (active installs)
+    for (const [fid, res] of Object.entries(results)) {
+      if (res === 'error' || (active === fid)) {
+        newResults[fid] = res
+      }
+    }
     setResults(newResults)
-    // If the previously-active feature is now installed, clear active state
+    // Clear stale active state — if no recent progress, nothing is really installing
     const act = activeRef.current
-    if (act && featuresStatus.features[act]?.installed) {
-      setActive(null)
-      setProgress(p => ({ ...p, [act]: 1 }))
+    if (act) {
+      const recentProgress = installProgress && (Date.now() - installProgress.timestamp < 30000)
+      if (featuresStatus.features[act]?.installed || !recentProgress) {
+        setActive(null)
+        if (featuresStatus.features[act]?.installed) {
+          setProgress(p => ({ ...p, [act]: 1 }))
+        }
+      }
     }
   }, [featuresStatus])
 
@@ -172,10 +213,15 @@ export default function FeaturesManager() {
   useEffect(() => {
     if (!installResult) return
     const fid = activeRef.current
+    console.log('[Features] Install result received:', JSON.stringify(installResult), 'active:', fid, 'queue:', queueRef.current)
     if (fid) {
       if (installResult.success) {
         setProgress(p => ({ ...p, [fid]: 1 }))
         setResults(r => ({ ...r, [fid]: 'success' }))
+        if (installResult.restart_needed) {
+          console.log('[Features] Restart needed after installing:', fid)
+          setRestartNeeded(true)
+        }
       } else {
         setProgress(p => ({ ...p, [fid]: 0 }))
         setResults(r => ({ ...r, [fid]: 'error' }))
@@ -183,29 +229,55 @@ export default function FeaturesManager() {
       }
     }
     setActive(null)
-    // Start next in queue
-    setTimeout(() => {
-      const q = queueRef.current
-      if (q.length > 0) startNext(q)
-    }, 300)
+    // Start next in queue, or restart if queue is done and restart was requested
+    const pendingQueue = [...queueRef.current]
+    console.log('[Features] Will start next from queue:', pendingQueue)
+    if (pendingQueue.length > 0) {
+      setTimeout(() => {
+        console.log('[Features] Starting next feature from queue:', pendingQueue[0])
+        startNext(pendingQueue)
+      }, 300)
+    }
   }, [installResult, startNext])
+
+  // Auto-restart when queue empties and restart was requested (torch installed)
+  useEffect(() => {
+    if (restartNeeded && !active && queue.length === 0) {
+      console.log('[Features] All installs done, triggering restart for GPU support')
+      sendMessage({ type: 'restart_app' })
+    }
+  }, [restartNeeded, active, queue, sendMessage])
 
   // Handle uninstall result from store
   useEffect(() => {
     if (!uninstallResult) return
+    console.log('[Features] Uninstall result received:', JSON.stringify(uninstallResult))
     const fid = uninstallResult.feature
     if (fid) {
       if (uninstallResult.success) {
+        console.log('[Features] Uninstall success:', fid)
         setResults(r => { const copy = { ...r }; delete copy[fid]; return copy })
         setProgress(p => { const copy = { ...p }; delete copy[fid]; return copy })
+        // Clear persisted settings for uninstalled features
+        if (fid === 'rvc') {
+          useSettingsStore.getState().updateRVC({ modelPath: null, indexPath: null, enabled: false, recentModels: [] })
+        }
+        // Uninstalling torch breaks RVC and STT — clear RVC model path
+        if (fid === 'torch_cpu' || fid === 'torch_cuda') {
+          useSettingsStore.getState().updateRVC({ modelPath: null, indexPath: null, enabled: false })
+        }
+        // Refresh features status so UI shows correct installed state
+        sendMessage({ type: 'get_features_status' })
       } else {
         setErrorMsg(uninstallResult.error || 'Uninstall failed')
       }
     }
-    setActive(null)
-  }, [uninstallResult])
+    setUninstalling(null)
+    if (uninstallTimerRef.current) { clearTimeout(uninstallTimerRef.current); uninstallTimerRef.current = null }
+  }, [uninstallResult, sendMessage])
 
   const install = (featureId: string) => {
+    console.log('[Features] Install clicked', featureId)
     // Don't re-queue if already queued or active
     if (active === featureId || queue.includes(featureId)) return
     // Clear previous result and progress for this feature
@@ -237,16 +309,83 @@ export default function FeaturesManager() {
     }
   }
 
+  const [uninstalling, setUninstalling] = useState<string | null>(null)
+  const uninstallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const uninstall = (featureId: string) => {
-    if (active) return
-    setActive(featureId)
+    console.log('[Features] Uninstall clicked:', featureId, 'currently uninstalling:', uninstalling, 'active:', active)
+    if (uninstalling) {
+      console.log('[Features] Uninstall BLOCKED — already uninstalling:', uninstalling)
+      return
+    }
+    setUninstalling(featureId)
+    // Clear stale uninstall result so new result triggers the effect
+    useFeaturesStore.getState().setUninstallResult(null as any)
+    console.log('[Features] Sending uninstall_feature:', featureId)
     sendMessage({ type: 'uninstall_feature', payload: { feature_id: featureId } })
+    // Safety timeout — clear stuck state after 30s
+    if (uninstallTimerRef.current) clearTimeout(uninstallTimerRef.current)
+    uninstallTimerRef.current = setTimeout(() => {
+      console.log('[Features] Uninstall safety timeout triggered for:', featureId)
+      setUninstalling(null)
+      sendMessage({ type: 'get_features_status' })
+    }, 30000)
   }
+
+  const installAll = () => {
+    console.log('[Features] Install All clicked')
+    // Queue all uninstalled features (skip torch — default to CPU)
+    const toInstall: string[] = []
+    for (const feature of FEATURES) {
+      const fid = feature.id
+      const effectiveId = feature.torchPick ? 'torch_cpu' : fid
+      const result = results[fid] || (feature.torchPick ? (results['torch_cpu'] || results['torch_cuda']) : undefined)
+      if (result !== 'success' && !queue.includes(effectiveId) && active !== effectiveId) {
+        toInstall.push(effectiveId)
+      }
+    }
+    if (toInstall.length === 0) return
+    // Start first, queue rest
+    if (!active) {
+      const [first, ...rest] = toInstall
+      setActive(first)
+      setProgress(p => ({ ...p, [first]: 0.05 }))
+      sendMessage({ type: 'install_feature', payload: { feature_id: first } })
+      if (rest.length > 0) {
+        setQueue(q => [...q, ...rest])
+        for (const r of rest) setProgress(p => ({ ...p, [r]: 0 }))
+      }
+    } else {
+      setQueue(q => [...q, ...toInstall])
+      for (const r of toInstall) setProgress(p => ({ ...p, [r]: 0 }))
+    }
+  }
+
+  const allInstalled = FEATURES.every(f => {
+    const r = results[f.id] || (f.torchPick ? (results['torch_cpu'] || results['torch_cuda']) : undefined)
+    return r === 'success'
+  })
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 16 }}>
-      <div style={{ fontSize: 12, opacity: 0.5, padding: '0 2px' }}>
-        Click to install optional features.
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px' }}>
+        <div style={{ fontSize: 12, opacity: 0.5 }}>
+          Click to install optional features.
+        </div>
+        {!allInstalled && (
+          <button
+            onClick={installAll}
+            disabled={!!active}
+            style={{
+              ...btnStyle,
+              fontSize: 12,
+              padding: '4px 14px',
+              opacity: active ? 0.5 : 1,
+            }}
+          >
+            Install All
+          </button>
+        )}
       </div>
 
       {errorMsg && (
@@ -324,32 +463,43 @@ export default function FeaturesManager() {
                     <button
                       onClick={() => install(results['torch_cuda'] ? 'torch_cpu' : 'torch_cuda')}
                       disabled={!!active}
-                      style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', opacity: 0.7 }}>
+                      style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', opacity: active ? 0.3 : 0.7, cursor: active ? 'not-allowed' : 'pointer' }}>
                       Switch to {results['torch_cuda'] ? 'CPU' : 'CUDA'}
                     </button>
                     <button
-                      onClick={() => uninstall(results['torch_cuda'] ? 'torch_cuda' : 'torch_cpu')}
-                      disabled={!!active}
+                      onClick={() => { console.log('[Features] Uninstall X clicked for torch'); uninstall(results['torch_cuda'] ? 'torch_cuda' : 'torch_cpu') }}
+                      disabled={!!uninstalling}
                       title="Uninstall"
-                      style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', background: '#433', borderColor: '#644', color: '#c88' }}>
-                      ✕
+                      style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', background: '#433', borderColor: '#644', color: uninstalling === (results['torch_cuda'] ? 'torch_cuda' : 'torch_cpu') ? '#aa8833' : '#c88' }}>
+                      {uninstalling === (results['torch_cuda'] ? 'torch_cuda' : 'torch_cpu') ? '...' : '✕'}
                     </button>
                   </>
                 ) : (
                   <>
-                    <span style={{ color: '#4a8', fontSize: 13 }}>Installed</span>
+                    <span style={{ color: '#4a8', fontSize: 13 }}>
+                      {uninstalling === fid ? 'Removing...' : 'Installed'}
+                    </span>
                     <button
-                      onClick={() => uninstall(fid)}
-                      disabled={!!active}
+                      onClick={() => { console.log('[Features] Uninstall X clicked for', fid); uninstall(fid) }}
+                      disabled={!!uninstalling}
                       title="Uninstall"
-                      style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', background: '#433', borderColor: '#644', color: '#c88' }}>
-                      ✕
+                      style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', background: '#433', borderColor: '#644', color: uninstalling === fid ? '#aa8833' : '#c88' }}>
+                      {uninstalling === fid ? '...' : '✕'}
                     </button>
                   </>
                 )
               ) : result === 'error' ? (
-                <button onClick={() => install(feature.torchPick ? 'torch_cpu' : fid)}
-                  disabled={!!active} style={{ ...btnStyle, borderColor: '#733' }}>Retry</button>
+                feature.torchPick ? (
+                  <>
+                    <button onClick={() => install('torch_cpu')} disabled={!!active}
+                      style={{ ...btnStyle, borderColor: '#733' }}>Retry CPU</button>
+                    <button onClick={() => install('torch_cuda')} disabled={!!active}
+                      style={{ ...btnStyle, borderColor: '#733' }}>Retry CUDA</button>
+                  </>
+                ) : (
+                  <button onClick={() => install(fid)}
+                    disabled={!!active} style={{ ...btnStyle, borderColor: '#733' }}>Retry</button>
+                )
               ) : isActive ? (
                 <span style={{ color: '#aa8833', fontSize: 13 }}>Installing...</span>
               ) : isQueued ? (
@@ -357,13 +507,13 @@ export default function FeaturesManager() {
               ) : feature.torchPick ? (
                 <>
                   <button onClick={() => install('torch_cpu')} disabled={!!active && !isActive}
-                    style={btnStyle}>CPU</button>
+                    style={!!active && !isActive ? btnDisabledStyle : btnStyle}>CPU</button>
                   <button onClick={() => install('torch_cuda')} disabled={!!active && !isActive}
-                    style={btnStyle}>CUDA</button>
+                    style={!!active && !isActive ? btnDisabledStyle : btnStyle}>CUDA</button>
                 </>
               ) : (
                 <button onClick={() => install(fid)} disabled={!!active && !isActive}
-                  style={btnStyle}>Install</button>
+                  style={!!active && !isActive ? btnDisabledStyle : btnStyle}>Install</button>
               )}
             </div>
           </div>
@@ -380,7 +530,7 @@ export default function FeaturesManager() {
       {/* VOICEVOX Engine */}
       <div style={{
         position: 'relative',
-        display: 'flex', flexDirection: 'column', gap: 8,
+        display: 'flex', flexDirection: 'column',
         padding: '10px 14px',
         background: '#1e1e2e',
         borderRadius: 8,
@@ -423,7 +573,7 @@ export default function FeaturesManager() {
             </div>
           </div>
 
-          <div style={{ marginLeft: 12, display: 'flex', gap: 6, flexShrink: 0 }}>
+          <div style={{ marginLeft: 12, display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center', position: 'relative', zIndex: 1 }}>
             {vvInstalled === null ? (
               <span style={{ color: '#888', fontSize: 13 }}>Checking...</span>
             ) : vvSetupProgress ? (
@@ -435,77 +585,30 @@ export default function FeaturesManager() {
             ) : vvInstalled ? (
               <>
                 <span style={{ color: '#4a8', fontSize: 13 }}>
-                  Installed{vvEngineRunning ? ' & Running' : ''}
+                  {vvEngineRunning ? 'Running' : 'Installed'}
                 </span>
-              </>
-            ) : (
-              <span style={{ color: '#888', fontSize: 13 }}>Not installed</span>
-            )}
-          </div>
-        </div>
-
-        {/* Progress bar during download/extract */}
-        {vvSetupProgress && vvSetupProgress.stage !== 'starting' && (
-          <div style={{ position: 'relative', zIndex: 1 }}>
-            <div style={{
-              width: '100%', height: 6, background: '#333', borderRadius: 3, overflow: 'hidden',
-            }}>
-              <div style={{
-                height: '100%', borderRadius: 3,
-                background: '#4a8',
-                width: `${Math.min(vvSetupProgress.progress, 100)}%`,
-                transition: 'width 0.4s ease-out',
-              }} />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-              <span style={{ fontSize: 11, opacity: 0.6 }}>{vvSetupProgress.detail}</span>
-              <button
-                onClick={() => sendMessage({ type: 'voicevox_cancel_download' })}
-                style={{ ...btnStyle, fontSize: 11, padding: '1px 8px', background: '#433', borderColor: '#644', color: '#c88' }}
-              >Cancel</button>
-            </div>
-          </div>
-        )}
-
-        {/* Starting spinner */}
-        {vvSetupProgress && vvSetupProgress.stage === 'starting' && (
-          <div style={{ position: 'relative', zIndex: 1, fontSize: 12, opacity: 0.6 }}>
-            {vvSetupProgress.detail}
-          </div>
-        )}
-
-        {/* Action buttons */}
-        {!vvSetupProgress && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', position: 'relative', zIndex: 1 }}>
-            {vvInstalled === null ? null : vvInstalled ? (
-              <>
                 {!vvEngineRunning ? (
                   <button
-                    onClick={() => sendMessage({ type: 'voicevox_start_engine' })}
-                    style={btnStyle}
-                  >Start Engine</button>
+                    onClick={() => { console.log('[Features] VOICEVOX Start Engine'); sendMessage({ type: 'voicevox_start_engine' }) }}
+                    style={{ ...btnStyle, fontSize: 11, padding: '2px 8px' }}
+                  >Start</button>
                 ) : (
                   <button
-                    onClick={() => sendMessage({ type: 'voicevox_stop_engine' })}
-                    style={{ ...btnStyle, opacity: 0.7 }}
-                  >Stop Engine</button>
+                    onClick={() => { console.log('[Features] VOICEVOX Stop Engine'); sendMessage({ type: 'voicevox_stop_engine' }) }}
+                    style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', opacity: 0.7 }}
+                  >Stop</button>
                 )}
                 <button
                   onClick={() => {
-                    if (confirm('Uninstall VOICEVOX Engine? You can reinstall later with a different build.')) {
-                      sendMessage({ type: 'voicevox_stop_engine' })
-                      sendMessage({ type: 'voicevox_uninstall_engine' })
-                      setVvInstalled(false)
-                      setVvEngineRunning(false)
-                    }
+                    console.log('[Features] VOICEVOX Uninstall')
+                    sendMessage({ type: 'voicevox_stop_engine' })
+                    sendMessage({ type: 'voicevox_uninstall_engine' })
+                    setVvInstalled(false)
+                    setVvEngineRunning(false)
                   }}
+                  title="Uninstall"
                   style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', background: '#433', borderColor: '#644', color: '#c88' }}
-                >Uninstall</button>
-                {vvInstallPath && (
-                  <span style={{ fontSize: 11, opacity: 0.4, alignSelf: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>
-                    {vvInstallPath}
-                  </span>
-                )}
+                >✕</button>
               </>
             ) : (
               <>
@@ -513,6 +616,7 @@ export default function FeaturesManager() {
                   value={vvBuildType}
                   onChange={(e) => {
                     const bt = e.target.value as 'directml' | 'cpu'
+                    console.log('[Features] VOICEVOX Build Type changed', bt)
                     setVvBuildType(bt)
                     updateTTS({ voicevoxBuildType: bt })
                   }}
@@ -521,18 +625,28 @@ export default function FeaturesManager() {
                     color: '#ddd', fontSize: 12, padding: '3px 8px', cursor: 'pointer',
                   }}
                 >
-                  <option value="directml">DirectML / GPU (~1.75 GB)</option>
-                  <option value="cpu">CPU only (~1.74 GB)</option>
+                  <option value="directml">DirectML / GPU</option>
+                  <option value="cpu">CPU only</option>
                 </select>
                 <button
-                  onClick={() => sendMessage({
+                  onClick={() => { console.log('[Features] VOICEVOX Install clicked', vvBuildType); sendMessage({
                     type: 'voicevox_download_engine',
                     payload: { build_type: vvBuildType }
-                  })}
+                  }) }}
                   style={btnStyle}
                 >Install</button>
               </>
             )}
+          </div>
+        </div>
+
+        {/* Cancel button during download */}
+        {vvSetupProgress && vvSetupProgress.stage !== 'starting' && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', position: 'relative', zIndex: 1, marginTop: 4 }}>
+            <button
+              onClick={() => { console.log('[Features] VOICEVOX Cancel Download'); sendMessage({ type: 'voicevox_cancel_download' }) }}
+              style={{ ...btnStyle, fontSize: 11, padding: '1px 8px', background: '#433', borderColor: '#644', color: '#c88' }}
+            >Cancel</button>
           </div>
         )}
       </div>
@@ -548,7 +662,7 @@ export default function FeaturesManager() {
   )
 }
 
-const btnStyle: React.CSSProperties = {
+const btnBase: React.CSSProperties = {
   padding: '4px 12px',
   background: '#335',
   border: '1px solid #557',
@@ -556,4 +670,13 @@ const btnStyle: React.CSSProperties = {
   color: '#ddd',
   cursor: 'pointer',
   fontSize: 13,
+}
+
+const btnStyle: React.CSSProperties = btnBase
+
+const btnDisabledStyle: React.CSSProperties = {
+  ...btnBase,
+  opacity: 0.4,
+  cursor: 'not-allowed',
+  pointerEvents: 'none' as const,
 }

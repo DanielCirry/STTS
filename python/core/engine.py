@@ -432,8 +432,92 @@ class STTSEngine:
         active = language_pairs[active_index] if active_index < len(language_pairs) else language_pairs[0]
         return {'source': active.get('source', 'eng_Latn'), 'target': active.get('target', 'jpn_Jpan')}
 
+    @staticmethod
+    def _split_emojis(text: str) -> list:
+        """Split text into alternating [text, emoji, text, emoji, ...] segments.
+
+        Preserves emojis and trailing punctuation so they survive translation.
+        """
+        # Match common emoji ranges using built-in re (no regex dependency needed)
+        # Covers: emoticons, dingbats, symbols, supplemental symbols, flags, etc.
+        emoji_pattern = re.compile(
+            '['
+            '\U0001F600-\U0001F64F'  # emoticons
+            '\U0001F300-\U0001F5FF'  # misc symbols & pictographs
+            '\U0001F680-\U0001F6FF'  # transport & map
+            '\U0001F700-\U0001F77F'  # alchemical symbols
+            '\U0001F780-\U0001F7FF'  # geometric shapes extended
+            '\U0001F800-\U0001F8FF'  # supplemental arrows-C
+            '\U0001F900-\U0001F9FF'  # supplemental symbols
+            '\U0001FA00-\U0001FA6F'  # chess symbols
+            '\U0001FA70-\U0001FAFF'  # symbols extended-A
+            '\U00002702-\U000027B0'  # dingbats
+            '\U0000FE00-\U0000FE0F'  # variation selectors
+            '\U0000200D'             # ZWJ
+            '\U00002600-\U000026FF'  # misc symbols
+            '\U00002300-\U000023FF'  # misc technical
+            '\U00002764'             # heart
+            '\U00002B50'             # star
+            '\U00002B05-\U00002B07'  # arrows
+            '\U00002934-\U00002935'  # arrows
+            '\U000025AA-\U000025AB'  # squares
+            '\U000025FB-\U000025FE'  # squares
+            '\U00003030\U0000303D'   # wavy dash, part alternation mark
+            '\U0000200D'             # ZWJ
+            ']+',
+            re.UNICODE
+        )
+        parts = []
+        last_end = 0
+        for m in emoji_pattern.finditer(text):
+            if m.start() > last_end:
+                parts.append(('text', text[last_end:m.start()]))
+            parts.append(('emoji', m.group()))
+            last_end = m.end()
+        if last_end < len(text):
+            parts.append(('text', text[last_end:]))
+        return parts
+
+    def _translate_preserving_emojis(self, text: str, source_lang: str, target_lang: str) -> str:
+        """Translate text while preserving emoji positions.
+
+        Splits text around emojis, translates each text chunk, and reassembles
+        with emojis in their original positions. Trailing punctuation after emojis
+        is preserved without translation.
+        """
+        parts = self._split_emojis(text)
+
+        # If no emojis found, translate directly
+        if not any(p[0] == 'emoji' for p in parts):
+            return self._translate_text_raw(text, source_lang, target_lang)
+
+        result_parts = []
+        for kind, segment in parts:
+            if kind == 'emoji':
+                result_parts.append(segment)
+            else:
+                # Strip trailing punctuation that doesn't need translation
+                stripped = segment.rstrip()
+                trailing_ws = segment[len(stripped):]
+                punct_end = ''
+                while stripped and stripped[-1] in '!?.,;:…':
+                    punct_end = stripped[-1] + punct_end
+                    stripped = stripped[:-1]
+
+                clean = stripped.strip()
+                if clean:
+                    translated_chunk = self._translate_text_raw(clean, source_lang, target_lang)
+                    result_parts.append(translated_chunk + punct_end + trailing_ws)
+                else:
+                    # Only punctuation/whitespace, keep as-is
+                    result_parts.append(segment)
+
+        return ''.join(result_parts)
+
     def _translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
         """Translate text respecting the user's selected provider.
+
+        Preserves emojis in their original positions through translation.
 
         Provider routing:
         - 'local': Direct to local NLLB only
@@ -450,6 +534,22 @@ class STTSEngine:
 
         Raises:
             RuntimeError: If no translation provider is available
+        """
+        # Check if text contains emojis — if so, use emoji-preserving path
+        parts = self._split_emojis(text)
+        if any(p[0] == 'emoji' for p in parts):
+            logger.debug(f"[translate] Text contains emojis, using emoji-preserving translation")
+            return self._translate_preserving_emojis(text, source_lang, target_lang)
+
+        return self._translate_text_raw(text, source_lang, target_lang)
+
+    def _translate_text_raw(self, text: str, source_lang: str, target_lang: str) -> str:
+        """Translate text without emoji handling (raw translation).
+
+        Provider routing:
+        - 'local': Direct to local NLLB only
+        - 'free': Free providers only (MyMemory -> LibreTranslate -> Lingva), fall back to NLLB
+        - 'google'/'deepl': Paid cloud first, fall back to free, then NLLB
         """
         provider = self.settings.get('translation', {}).get('provider', 'local')
 
@@ -824,7 +924,7 @@ class STTSEngine:
            - Return early (don't translate or speak the keyword text itself)
         2. If no AI keyword: translate user text, speak only if mic→RVC is off
         """
-        logger.debug(f"Transcript [{detected_language}]: {text}")
+        logger.info(f"[transcript] text='{text[:80]}' detected_lang={detected_language}")
 
         # Send to frontend
         await self.broadcast(create_event(EventType.TRANSCRIPT_FINAL, {
@@ -861,22 +961,26 @@ class STTSEngine:
             has_cloud = self._cloud_translator and self._cloud_translator.active_provider is not None
             has_free = self._free_translator is not None
             has_local = self._translator and self._translator.is_loaded
+            logger.info(f"[translate] enabled=True, has_cloud={has_cloud}, has_free={has_free}, has_local={has_local}")
             if has_cloud or has_free or has_local:
                 try:
                     detected_nllb = self._whisper_to_nllb(detected_language) if detected_language else None
+                    logger.info(f"[translate] detected_nllb={detected_nllb}")
 
                     if detected_nllb:
                         pair = self._find_translation_pair(detected_nllb)
+                        logger.info(f"[translate] found pair for detected lang: {pair}")
                         if pair:
                             source_lang = pair['source']
                             target_lang = pair['target']
                             if source_lang != target_lang:
                                 translated = self._translate_text(text, source_lang, target_lang)
                                 self._translation_failure_count = 0
-                                logger.debug(f"Translation [{source_lang} -> {target_lang}]: {translated}")
+                                logger.info(f"[translate] [{source_lang} -> {target_lang}]: '{translated[:80] if translated else 'NONE'}'")
                     else:
                         language_pairs = self.settings['translation'].get('language_pairs', [])
                         active_index = self.settings['translation'].get('active_pair_index', 0)
+                        logger.info(f"[translate] no detected lang, using active pair: index={active_index}, pairs={language_pairs}")
                         if language_pairs and active_index < len(language_pairs):
                             active = language_pairs[active_index]
                             source_lang = active.get('source', 'eng_Latn')
@@ -884,9 +988,10 @@ class STTSEngine:
                         else:
                             source_lang = self.settings['translation'].get('source', 'eng_Latn')
                             target_lang = self.settings['translation'].get('target', 'jpn_Jpan')
+                        logger.info(f"[translate] fallback path: {source_lang} -> {target_lang}")
                         translated = self._translate_text(text, source_lang, target_lang)
                         self._translation_failure_count = 0
-                        logger.debug(f"Translation (fallback) [{source_lang} -> {target_lang}]: {translated}")
+                        logger.info(f"[translate] result: '{translated[:80] if translated else 'NONE'}'")
                 except Exception as e:
                     logger.error(f"Translation error: {e}")
                     translated = None
@@ -1129,11 +1234,24 @@ class STTSEngine:
             'vram_used_mb': 0,
             'vram_free_mb': 0,
         }
+
+        # In frozen exe, check if CUDA torch is installed in venv (dist-info check)
+        if getattr(sys, 'frozen', False) and not info['available']:
+            try:
+                from utils.package_manager import _get_venv_package_version
+                torch_ver = _get_venv_package_version('torch')
+                if torch_ver and 'cu' in torch_ver:
+                    info['available'] = True
+                    info['name'] = 'NVIDIA GPU (CUDA torch installed)'
+            except Exception:
+                pass
+
         try:
             if 'torch' not in sys.modules and getattr(sys, 'frozen', False):
                 raise ImportError("skip torch in frozen exe")
             import torch
             if torch.cuda.is_available():
+                info['available'] = True
                 info['name'] = torch.cuda.get_device_name(0)
                 total = torch.cuda.get_device_properties(0).total_mem
                 info['vram_total_mb'] = round(total / (1024 * 1024))
@@ -1297,6 +1415,15 @@ class STTSEngine:
 
     def update_settings(self, settings: Dict[str, Any]):
         """Update engine settings."""
+        logger.info(f"[update_settings] keys={list(settings.keys())}")
+
+        # Log translation settings in detail
+        if 'translation' in settings:
+            t = settings['translation']
+            pairs = t.get('language_pairs', [])
+            idx = t.get('active_pair_index', '?')
+            logger.info(f"[update_settings] translation: active_pair_index={idx}, pairs={pairs}")
+
         # Track old device setting before merge
         old_device = self.settings.get('stt', {}).get('device', 'auto')
 
@@ -1306,6 +1433,14 @@ class STTSEngine:
                 self.settings[key].update(value)
             else:
                 self.settings[key] = value
+
+        # Log effective translation state after merge
+        if 'translation' in settings:
+            t = self.settings.get('translation', {})
+            pairs = t.get('language_pairs', [])
+            idx = t.get('active_pair_index', '?')
+            active = pairs[idx] if isinstance(idx, int) and idx < len(pairs) else 'NONE'
+            logger.info(f"[update_settings] EFFECTIVE translation: active_pair_index={idx}, active_pair={active}, total_pairs={len(pairs)}")
 
         # Reload models if compute device changed
         new_device = self.settings.get('stt', {}).get('device', 'auto')
@@ -1327,11 +1462,14 @@ class STTSEngine:
             if 'engine' in tts_settings:
                 requested = tts_settings['engine']
                 if not self._tts.set_engine(requested):
-                    actual = self._tts.get_current_engine()
+                    # Requested engine not available, prefer edge (always online)
+                    if requested != 'edge' and self._tts.set_engine('edge'):
+                        actual = 'edge'
+                    else:
+                        actual = self._tts.get_current_engine()
                     logger.warning(
                         f"TTS engine '{requested}' not available, using '{actual}'"
                     )
-                    # Update stored settings to reflect actual engine
                     self.settings['tts']['engine'] = actual
             if 'voice' in tts_settings:
                 self._tts.set_voice(tts_settings['voice'])
@@ -1559,6 +1697,14 @@ class STTSEngine:
         stt_loaded = self._stt.is_loaded if self._stt else False
         logger.debug(f"[start_listening] After load: stt={self._stt is not None}, is_loaded={stt_loaded}, callback={self._stt.on_final_transcript is not None if self._stt else 'N/A'}")
 
+        if not stt_loaded:
+            logger.error("[start_listening] STT model failed to load — aborting listen")
+            return
+
+        # Stop mic test if active (it holds the mic stream open)
+        if self._mic_testing:
+            await self.stop_mic_test()
+
         # Start audio capture
         if self._audio_manager:
             device_id = self.settings.get('audio', {}).get('input_device')
@@ -1578,6 +1724,7 @@ class STTSEngine:
 
     async def stop_listening(self):
         """Stop listening for audio input."""
+        logger.debug("[stop_listening] Called, currently listening=%s", self.listening)
         if not self.listening:
             return
 
@@ -1599,6 +1746,7 @@ class STTSEngine:
 
     async def start_mic_test(self, device_id: int = None):
         """Start microphone test - captures audio and sends levels without loading STT."""
+        logger.debug(f"[start_mic_test] Called, device_id={device_id}, already_testing={self._mic_testing}")
         if self._mic_testing:
             return
 
@@ -1612,6 +1760,7 @@ class STTSEngine:
 
     async def stop_mic_test(self):
         """Stop microphone test."""
+        logger.debug(f"[stop_mic_test] Called, currently_testing={self._mic_testing}")
         if not self._mic_testing:
             return
 
@@ -1619,6 +1768,96 @@ class STTSEngine:
             self._audio_manager.stop_microphone()
             self._mic_testing = False
             logger.debug("Stopped microphone test")
+
+    async def test_speaker(self, device_id: int = None):
+        """Play a short test tone on the specified output device."""
+        logger.debug(f"[test_speaker] Called, device_id={device_id}")
+        import asyncio
+        try:
+            import sounddevice as sd
+
+            # Query device's default sample rate instead of hardcoding
+            sample_rate = None
+            try:
+                dev_info = sd.query_devices(device_id, 'output')
+                sample_rate = int(dev_info['default_samplerate'])
+            except Exception:
+                pass
+            if not sample_rate:
+                # Fallback through common rates
+                for sr in [48000, 44100, 22050, 16000]:
+                    try:
+                        sd.check_output_settings(device=device_id, samplerate=sr)
+                        sample_rate = sr
+                        break
+                    except Exception:
+                        continue
+            if not sample_rate:
+                sample_rate = 44100  # last resort
+
+            duration = 0.5  # seconds
+            freq = 440  # A4 note
+
+            # Generate a sine wave with fade in/out
+            t = np.linspace(0, duration, int(sample_rate * duration), dtype=np.float32)
+            tone = 0.3 * np.sin(2 * np.pi * freq * t)
+            # Fade in/out to avoid clicks
+            fade_len = int(sample_rate * 0.05)
+            tone[:fade_len] *= np.linspace(0, 1, fade_len)
+            tone[-fade_len:] *= np.linspace(1, 0, fade_len)
+
+            def play_sync():
+                sd.play(tone, samplerate=sample_rate, device=device_id)
+                sd.wait()
+
+            await asyncio.get_event_loop().run_in_executor(None, play_sync)
+            logger.debug(f"Speaker test completed on device {device_id} at {sample_rate}Hz")
+        except Exception as e:
+            logger.error(f"Speaker test failed: {e}")
+            await self.broadcast(create_event(EventType.ERROR, {
+                'message': f'Speaker test failed: {str(e)}'
+            }))
+
+    async def test_loopback(self, device_id: int = None):
+        """Test loopback capture by playing a tone on the device and capturing it."""
+        logger.info(f"[test_loopback] Testing loopback capture on device {device_id}")
+        try:
+            import sounddevice as sd
+
+            # Resolve device — use speaker capture device from settings if not specified
+            if device_id is None:
+                device_id = self.settings.get('audio', {}).get('speaker_capture_device')
+
+            # Play a tone on the default output, then try to capture via loopback
+            # For now, just verify the loopback device can be opened
+            if self._speaker_capture and self._speaker_capture.is_available():
+                # Quick test: start and stop capture
+                success = self._speaker_capture.start_capture(device_id)
+                if success:
+                    logger.info(f"[test_loopback] Loopback capture started successfully on device {device_id}")
+                    await self.broadcast({'type': 'loopback_test_result', 'payload': {'success': True, 'message': 'Loopback capture working!'}})
+                    # Capture for 1 second to verify
+                    import time
+                    await asyncio.get_event_loop().run_in_executor(None, lambda: time.sleep(1))
+                    self._speaker_capture.stop_capture()
+                    logger.info("[test_loopback] Loopback test passed")
+                else:
+                    logger.error("[test_loopback] Failed to start loopback capture")
+                    await self.broadcast({'type': 'loopback_test_result', 'payload': {'success': False, 'message': 'Loopback capture failed to start'}})
+                    await self.broadcast(create_event(EventType.ERROR, {
+                        'message': 'Loopback capture failed to start. Check your audio device.'
+                    }))
+            else:
+                logger.error("[test_loopback] Speaker capture not available")
+                await self.broadcast({'type': 'loopback_test_result', 'payload': {'success': False, 'message': 'WASAPI loopback not available'}})
+                await self.broadcast(create_event(EventType.ERROR, {
+                    'message': 'Speaker capture (WASAPI loopback) not available'
+                }))
+        except Exception as e:
+            logger.error(f"[test_loopback] Failed: {e}")
+            await self.broadcast(create_event(EventType.ERROR, {
+                'message': f'Loopback test failed: {str(e)}'
+            }))
 
     async def start_speaker_capture(self):
         """Start capturing speaker/system audio."""
@@ -1829,17 +2068,22 @@ class STTSEngine:
         Returns:
             AI response
         """
-        logger.debug(f"AI query: {query[:50]}...")
+        logger.info(f"[ai_query] query='{query[:80]}' assistant={self._ai_assistant is not None} fallback={self._fallback_manager is not None}")
 
         if not self._ai_assistant:
+            logger.warning("[ai_query] AI assistant not initialized")
             return "AI assistant not available"
 
         try:
+            candidates = self._fallback_manager._get_candidates()
+            logger.info(f"[ai_query] available providers: {candidates}")
             response = await self._fallback_manager.generate(query)
+            logger.info(f"[ai_query] response model={response.model}, content='{response.content[:80]}', truncated={response.truncated}")
             return response.content
 
         except Exception as e:
-            logger.error(f"Error in AI query: {e}")
+            import traceback
+            logger.error(f"[ai_query] error: {e}\n{traceback.format_exc()}")
             return f"Error: {e}"
 
     async def cleanup(self):
@@ -2087,6 +2331,12 @@ class STTSEngine:
             return False
         return self._ai_assistant.set_local_models_directory(path)
 
+    def get_llm_status(self) -> Dict[str, Any]:
+        """Get current local LLM status."""
+        if not self._ai_assistant:
+            return {'loaded': False, 'model': None, 'model_path': None}
+        return self._ai_assistant.get_llm_status()
+
     def get_local_models_directory(self) -> str:
         """Get the current local models directory.
 
@@ -2278,9 +2528,15 @@ class STTSEngine:
         return models
 
     async def rvc_load_model(self, model_path: str, index_path: Optional[str] = None):
-        """Load an RVC voice model."""
+        """Load an RVC voice model. Auto-downloads base models if missing."""
+        logger.info(f"[rvc] rvc_load_model called: path={model_path}, index={index_path}")
+        # Stop mic RVC if active — avoids stream errors during model swap
+        if self._mic_rvc and self._mic_rvc.is_running:
+            logger.info("[rvc] Stopping mic RVC before model switch")
+            await self.mic_rvc_stop()
         rvc = self._init_rvc_with_callbacks()
         if not rvc:
+            logger.error("[rvc] TTS manager not available")
             await self.broadcast(create_event(EventType.RVC_MODEL_ERROR, {
                 'error': 'TTS manager not available'
             }))
@@ -2290,24 +2546,38 @@ class STTSEngine:
         self.settings['rvc']['model_path'] = model_path
         self.settings['rvc']['index_path'] = index_path
 
-        success = await rvc.load_model(model_path, index_path)
-        if success:
-            rvc.enable(True)
-            self.settings['rvc']['enabled'] = True
-        else:
-            # Check if it's a base models issue (on_status callback handles this)
-            check = rvc._check_base_models()
-            if check['needs_download']:
-                await self.broadcast(create_event(EventType.RVC_BASE_MODELS_NEEDED, {
-                    'size_mb': 400,
-                }))
-            else:
-                # Clear pending path on real failure
+        # Auto-download base models if missing (no modal needed)
+        check = rvc._check_base_models()
+        if check['needs_download']:
+            logger.info(f"[rvc] Base models missing (hubert={check['hubert_exists']}, rmvpe={check['rmvpe_exists']}), auto-downloading...")
+            await self.broadcast(create_event(EventType.RVC_MODEL_LOADING, {
+                'stage': 'Downloading base models (HuBERT + RMVPE)...',
+                'progress': 0.0,
+            }))
+            dl_success = await self.rvc_download_base_models()
+            if not dl_success:
+                logger.error("[rvc] Base models download failed")
                 self.settings['rvc']['model_path'] = None
                 self.settings['rvc']['index_path'] = None
                 await self.broadcast(create_event(EventType.RVC_MODEL_ERROR, {
-                    'error': 'Failed to load model',
+                    'error': 'Failed to download base models (HuBERT + RMVPE)',
                 }))
+                return False
+            logger.info("[rvc] Base models downloaded successfully, proceeding to load model")
+
+        success = await rvc.load_model(model_path, index_path)
+        if success:
+            logger.info(f"[rvc] Model loaded successfully: {model_path}")
+            rvc.enable(True)
+            self.settings['rvc']['enabled'] = True
+        else:
+            logger.error(f"[rvc] Failed to load model: {model_path}")
+            # Clear pending path on real failure
+            self.settings['rvc']['model_path'] = None
+            self.settings['rvc']['index_path'] = None
+            await self.broadcast(create_event(EventType.RVC_MODEL_ERROR, {
+                'error': 'Failed to load model',
+            }))
         return success
 
     async def rvc_download_base_models(self):
@@ -2345,6 +2615,7 @@ class STTSEngine:
 
     async def rvc_enable(self, enabled: bool):
         """Enable or disable RVC."""
+        logger.debug(f"[rvc_enable] enabled={enabled}")
         rvc = self._tts.get_rvc() if self._tts else None
         if rvc:
             rvc.enable(enabled)
@@ -2394,8 +2665,16 @@ class STTSEngine:
 
     async def rvc_test_voice(self):
         """Record 3 seconds from mic, convert through RVC, send back for playback."""
+        logger.info("[rvc_test_voice] Starting RVC voice test")
         rvc = self._tts.get_rvc() if self._tts else None
-        if not rvc or not rvc.is_enabled():
+        if not rvc:
+            logger.error("[rvc_test_voice] No RVC instance (TTS not initialized?)")
+            await self.broadcast(create_event(EventType.RVC_TEST_VOICE_ERROR, {
+                'error': 'RVC is not available (TTS not initialized)'
+            }))
+            return
+        if not rvc.is_enabled():
+            logger.error(f"[rvc_test_voice] RVC not enabled. Status: {rvc.get_status()}")
             await self.broadcast(create_event(EventType.RVC_TEST_VOICE_ERROR, {
                 'error': 'RVC is not enabled or no model loaded'
             }))
@@ -2411,6 +2690,7 @@ class STTSEngine:
             sample_rate = 16000
             duration = 3
             input_device = self.settings.get('audio', {}).get('input_device', None)
+            logger.info(f"[rvc_test_voice] Recording {duration}s from device={input_device}, sr={sample_rate}")
 
             # Record in executor
             def record_sync():
@@ -2472,17 +2752,23 @@ class STTSEngine:
 
         from ai.rvc.mic_rvc import MicRVCProcessor
 
-        if self._mic_rvc is None:
-            self._mic_rvc = MicRVCProcessor(rvc)
+        # Always recreate MicRVCProcessor — model switch changes _tgt_sr
+        # and keeping the old instance causes sample rate mismatch errors
+        if self._mic_rvc is not None:
+            logger.debug("[mic_rvc] Recreating MicRVCProcessor for new model/config")
+            if self._mic_rvc.is_running:
+                self._mic_rvc.stop()
 
-            def _on_mic_rvc_error(msg):
-                if self._loop:
-                    asyncio.run_coroutine_threadsafe(
-                        self.broadcast(create_event(EventType.RVC_MIC_ERROR, {'error': msg})),
-                        self._loop
-                    )
+        self._mic_rvc = MicRVCProcessor(rvc)
 
-            self._mic_rvc.on_error = _on_mic_rvc_error
+        def _on_mic_rvc_error(msg):
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.broadcast(create_event(EventType.RVC_MIC_ERROR, {'error': msg})),
+                    self._loop
+                )
+
+        self._mic_rvc.on_error = _on_mic_rvc_error
 
         # MicRVCProcessor now uses its own sd.Stream for mic capture
         # (no AudioManager wiring needed)
@@ -2520,6 +2806,8 @@ class STTSEngine:
 
         # Auto-detect: if 'cuda' requested but unavailable, try DirectML
         if device_str == 'cuda' and not torch.cuda.is_available():
+            logger.warning(f"CUDA not available for RVC — torch.version.cuda={getattr(torch.version, 'cuda', 'None')}, "
+                           f"torch.__version__={torch.__version__}")
             try:
                 import torch_directml
                 device_str = 'directml'
@@ -2542,6 +2830,8 @@ class STTSEngine:
                 'message': f'Cannot use {device_str.upper()}: not available on this system',
                 'source': 'rvc',
             }))
+            # Send current device status back so frontend toggle reverts
+            await self.broadcast(create_event(EventType.RVC_STATUS, rvc.get_status()))
             # Restart mic if it was running (still on old device)
             if was_running:
                 self._mic_rvc.start(self._mic_rvc._output_device_id)

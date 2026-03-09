@@ -111,9 +111,9 @@ class MicRVCProcessor:
         self._output_device_id = output_device_id
         self._input_device_id = input_device_id
 
-        # Use model's target SR as device SR (sounddevice handles conversion)
-        tgt_sr = self._rvc._tgt_sr or 48000
-        self._device_sr = tgt_sr
+        # Always use 48kHz for audio devices — standard rate supported by all hardware.
+        # RVC output gets resampled from model's tgt_sr to 48kHz in _process_loop.
+        self._device_sr = 48000
 
         # Frame alignment unit (10ms at device SR)
         self._zc = self._device_sr // 100

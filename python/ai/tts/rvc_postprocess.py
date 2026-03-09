@@ -130,26 +130,42 @@ class RVCPostProcessor:
 
         check = self._check_base_models()
 
-        # Download ContentVec (HuBERT fine-tuned for voice conversion)
+        # Download ContentVec (HuBERT fine-tuned for voice conversion) via HTTP
         # IMPORTANT: RVC models were trained with ContentVec features, NOT vanilla HuBERT.
         # Using vanilla facebook/hubert-base-ls960 produces completely wrong features
-        # and results in gibberish output. ContentVec produces speaker-disentangled
-        # features that the RVC synthesizer expects.
+        # and results in gibberish output. We download the files directly to avoid
+        # needing torch at download time (torch may not be importable yet in frozen exe).
         if not check['hubert_exists']:
             try:
+                import aiohttp
+                hubert_dir = Path(check['hubert_path'])
+                hubert_dir.mkdir(parents=True, exist_ok=True)
+                # ContentVec model files from HuggingFace
+                CONTENTVEC_REPO = 'https://huggingface.co/lengyue233/content-vec-best/resolve/main'
+                hubert_files = ['config.json', 'pytorch_model.bin']
                 self._report_progress('downloading_hubert_base', 0.0)
-                logger.debug("Downloading ContentVec model via transformers (lengyue233/content-vec-best)")
-                loop = asyncio.get_event_loop()
-                hubert_dir = check['hubert_path']
+                logger.debug("Downloading ContentVec model files from HuggingFace")
 
-                def _download_hubert():
-                    from ai.rvc.pipeline import _import_hubert_model
-                    HubertModel = _import_hubert_model()
-                    model = HubertModel.from_pretrained('lengyue233/content-vec-best')
-                    model.save_pretrained(hubert_dir)
-                    return True
-
-                await loop.run_in_executor(None, _download_hubert)
+                async with aiohttp.ClientSession() as session:
+                    for i, fname in enumerate(hubert_files):
+                        url = f'{CONTENTVEC_REPO}/{fname}'
+                        dest = hubert_dir / fname
+                        logger.debug(f"Downloading {fname} from {url}")
+                        async with session.get(url) as resp:
+                            if resp.status != 200:
+                                logger.error(f"Download failed for {fname}: HTTP {resp.status}")
+                                return False
+                            total = int(resp.headers.get('content-length', 0))
+                            downloaded = 0
+                            with open(dest, 'wb') as f:
+                                async for chunk in resp.content.iter_chunked(1024 * 1024):
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total > 0:
+                                        file_pct = downloaded / total
+                                        # Scale progress: file 0 = 0-0.4, file 1 = 0.4-0.9
+                                        base = i * 0.45
+                                        self._report_progress('downloading_hubert_base', base + file_pct * 0.45)
                 self._report_progress('downloading_hubert_base', 1.0)
                 logger.debug(f"ContentVec model saved to {hubert_dir}")
             except Exception as e:
@@ -508,6 +524,17 @@ class RVCPostProcessor:
         import torch
 
         if device_str == 'cuda' and not torch.cuda.is_available():
+            # Log diagnostic info to help debug CUDA availability issues
+            logger.warning(f"CUDA not available — torch.version.cuda={getattr(torch.version, 'cuda', 'None')}, "
+                           f"torch.backends.cudnn.enabled={getattr(torch.backends.cudnn, 'enabled', 'N/A')}, "
+                           f"torch.__version__={torch.__version__}")
+            try:
+                import subprocess
+                result = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                                        capture_output=True, text=True, timeout=5)
+                logger.warning(f"nvidia-smi GPU: {result.stdout.strip() if result.returncode == 0 else 'FAILED'}")
+            except Exception:
+                logger.warning("nvidia-smi not found or failed")
             logger.warning("CUDA not available — staying on current device")
             return False
 
@@ -673,9 +700,6 @@ class RVCPostProcessor:
             return audio, seg.frame_rate
         except Exception as e:
             logger.error(f"MP3 decoding failed (no miniaudio or ffmpeg): {e}")
-            return None, 0
-        except Exception as e:
-            logger.error(f"miniaudio MP3 decode failed: {e}")
             return None, 0
 
     @staticmethod

@@ -72,7 +72,9 @@ class SpeakerCapture:
         """Set the loopback device to use.
 
         Args:
-            device_id: Device index or None for default
+            device_id: sounddevice device index or None for default.
+                       Matched to soundcard speakers by name since the two
+                       libraries use different numbering.
 
         Returns:
             True if successful
@@ -83,12 +85,31 @@ class SpeakerCapture:
             if device_id is None:
                 speaker = sc.default_speaker()
             else:
-                speakers = sc.all_speakers()
-                if 0 <= device_id < len(speakers):
-                    speaker = speakers[device_id]
-                else:
-                    logger.error(f"Invalid device ID: {device_id}")
-                    return False
+                # device_id is a sounddevice index — resolve the name first
+                # then find the matching soundcard speaker by name
+                speaker = None
+                try:
+                    import sounddevice as sd
+                    sd_info = sd.query_devices(device_id)
+                    sd_name = sd_info['name']
+                    logger.debug(f"Looking for soundcard speaker matching sounddevice [{device_id}] '{sd_name}'")
+                    speakers = sc.all_speakers()
+                    for s in speakers:
+                        if sd_name in s.name or s.name in sd_name:
+                            speaker = s
+                            break
+                    if speaker is None:
+                        # Fuzzy: match first word
+                        sd_first = sd_name.split('(')[0].strip().lower()
+                        for s in speakers:
+                            if sd_first in s.name.lower():
+                                speaker = s
+                                break
+                except Exception as e:
+                    logger.warning(f"Could not resolve sounddevice [{device_id}] to soundcard speaker: {e}")
+                if speaker is None:
+                    logger.warning(f"No soundcard speaker found for sounddevice [{device_id}], falling back to default")
+                    speaker = sc.default_speaker()
 
             # Find the loopback microphone matching this speaker
             loopback_mics = sc.all_microphones(include_loopback=True)
