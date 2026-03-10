@@ -318,7 +318,11 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
                 })))
 
                 async def _do_start_engine():
-                    success = await engine.voicevox_start_engine()
+                    try:
+                        success = await engine.voicevox_start_engine()
+                    except Exception as e:
+                        logger.error(f"[ws] voicevox_start_engine exception: {e}")
+                        success = False
                     await engine.broadcast(create_event(EventType.VOICEVOX_SETUP_PROGRESS, {
                         'stage': 'complete' if success else 'error',
                         'progress': 100 if success else 0,
@@ -454,6 +458,18 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
             if engine:
                 success = engine.unload_llm()
                 await websocket.send(json.dumps({'type': 'llm_unloaded', 'payload': {'success': success}}))
+
+        elif msg_type == 'unload_stt':
+            logger.info("[ws] unload_stt")
+            if engine:
+                success = engine.unload_stt()
+                await websocket.send(json.dumps({'type': 'stt_unloaded', 'payload': {'success': success}}))
+
+        elif msg_type == 'unload_translation':
+            logger.info("[ws] unload_translation")
+            if engine:
+                success = engine.unload_translation()
+                await websocket.send(json.dumps({'type': 'translation_unloaded', 'payload': {'success': success}}))
 
         elif msg_type == 'browse_llm_folder':
             logger.debug("[ws] browse_llm_folder")
@@ -909,6 +925,38 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
                 'type': 'rvc_available_devices',
                 'payload': {'devices': devices}
             }))
+
+        elif msg_type == 'save_settings_backup':
+            logger.info(f"[ws] save_settings_backup: keys={list(payload.keys()) if payload else 'none'}")
+            try:
+                appdata = os.environ.get('APPDATA') or str(Path.home())
+                backup_dir = Path(appdata) / 'STTS'
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_file = backup_dir / 'settings-backup.json'
+                with open(backup_file, 'w', encoding='utf-8') as f:
+                    json.dump(payload, f, indent=2)
+                logger.info(f"[ws] Settings backup saved to {backup_file}")
+                await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_SAVED, {'success': True})))
+            except Exception as e:
+                logger.error(f"[ws] Failed to save settings backup: {e}")
+                await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_SAVED, {'success': False, 'error': str(e)})))
+
+        elif msg_type == 'load_settings_backup':
+            logger.info("[ws] load_settings_backup")
+            try:
+                appdata = os.environ.get('APPDATA') or str(Path.home())
+                backup_file = Path(appdata) / 'STTS' / 'settings-backup.json'
+                if backup_file.exists():
+                    with open(backup_file, 'r', encoding='utf-8') as f:
+                        backup_data = json.load(f)
+                    logger.info(f"[ws] Settings backup loaded from {backup_file}, keys={list(backup_data.keys())}")
+                    await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_LOADED, {'found': True, 'settings': backup_data})))
+                else:
+                    logger.info(f"[ws] No settings backup found at {backup_file}")
+                    await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_LOADED, {'found': False})))
+            except Exception as e:
+                logger.error(f"[ws] Failed to load settings backup: {e}")
+                await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_LOADED, {'found': False, 'error': str(e)})))
 
         else:
             logger.warning(f"Unknown message type: {msg_type}")

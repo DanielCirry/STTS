@@ -76,9 +76,9 @@ const defaultModels: ModelInfo[] = [
     description: 'Best accuracy, optimized for speed',
     status: 'not_installed',
   },
-  // Translation Models
+  // Translation Models — IDs must match backend model names
   {
-    id: 'nllb-600M',
+    id: 'nllb-200-distilled-600M',
     name: 'NLLB 600M',
     category: 'translation',
     size: '1.2 GB',
@@ -87,12 +87,21 @@ const defaultModels: ModelInfo[] = [
     status: 'not_installed',
   },
   {
-    id: 'nllb-1.3B',
+    id: 'nllb-200-distilled-1.3B',
     name: 'NLLB 1.3B',
     category: 'translation',
     size: '2.6 GB',
     sizeBytes: 2.6 * 1024 * 1024 * 1024,
     description: 'Better translation quality',
+    status: 'not_installed',
+  },
+  {
+    id: 'nllb-200-3.3B',
+    name: 'NLLB 3.3B',
+    category: 'translation',
+    size: '6.6 GB',
+    sizeBytes: 6.6 * 1024 * 1024 * 1024,
+    description: 'Best translation quality',
     status: 'not_installed',
   },
   // TTS Voices

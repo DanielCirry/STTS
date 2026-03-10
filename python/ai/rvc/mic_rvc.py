@@ -87,6 +87,10 @@ class MicRVCProcessor:
         self._output_queue: queue.Queue = queue.Queue(maxsize=10)
         self._process_thread: Optional[threading.Thread] = None
 
+        # Latency tracking
+        self._latency_warned: bool = False
+        self._consecutive_slow: int = 0
+
         # Callbacks
         self.on_error: Optional[Callable[[str], None]] = None
         self.on_status: Optional[Callable[[str, dict], None]] = None
@@ -231,29 +235,47 @@ class MicRVCProcessor:
 
     def stop(self):
         """Stop real-time mic voice conversion."""
+        logger.info("[mic_rvc] stop() called, _running=%s", self._running)
         self._running = False
+
+        # Drain input queue so process thread can unblock quickly
+        while not self._input_queue.empty():
+            try:
+                self._input_queue.get_nowait()
+            except queue.Empty:
+                break
+
         if self._input_stream:
             try:
+                logger.debug("[mic_rvc] Stopping input stream")
                 self._input_stream.stop()
                 self._input_stream.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("[mic_rvc] Input stream stop error: %s", e)
             self._input_stream = None
         if self._output_stream:
             try:
+                logger.debug("[mic_rvc] Stopping output stream")
                 self._output_stream.stop()
                 self._output_stream.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("[mic_rvc] Output stream stop error: %s", e)
             self._output_stream = None
         if self._process_thread:
-            self._process_thread.join(timeout=2.0)
+            logger.debug("[mic_rvc] Joining process thread (timeout=5s)")
+            self._process_thread.join(timeout=5.0)
+            if self._process_thread.is_alive():
+                logger.warning("[mic_rvc] Process thread did not stop within 5s — abandoning")
+            else:
+                logger.debug("[mic_rvc] Process thread joined successfully")
             self._process_thread = None
         self._input_wav = None
         self._pitch_cache = None
         self._pitchf_cache = None
         self._sola_buffer = None
-        logger.debug("Mic RVC stopped")
+        self._latency_warned = False
+        self._consecutive_slow = 0
+        logger.info("[mic_rvc] Mic RVC stopped")
 
     def set_output_device(self, device_id: Optional[int]):
         """Change output device (requires restart)."""
@@ -332,6 +354,46 @@ class MicRVCProcessor:
                 t0 = time.perf_counter()
                 callback_count += 1
 
+                # Queue cap: if >3 blocks queued, drop oldest to prevent unbounded latency growth
+                queued = self._input_queue.qsize()
+                if queued > 3:
+                    dropped = 0
+                    while queued > 1:
+                        try:
+                            self._input_queue.get_nowait()
+                            dropped += 1
+                            queued -= 1
+                        except queue.Empty:
+                            break
+                    # Use the latest block instead
+                    try:
+                        indata = self._input_queue.get_nowait()
+                        dropped += 1
+                    except queue.Empty:
+                        pass  # use the block we already have
+                    logger.warning(f"Mic RVC: dropped {dropped} queued blocks to prevent latency spiral (queue was {queued + dropped})")
+                    if not self._latency_warned:
+                        self._latency_warned = True
+                        logger.warning(
+                            "Mic RVC: processing is slower than real-time on CPU. "
+                            "Install CUDA PyTorch for real-time voice conversion. "
+                            "This warning will not repeat."
+                        )
+                        if self.on_status:
+                            self.on_status('rvc_latency_warning', {
+                                'message': 'RVC is too slow for real-time on CPU. Install CUDA PyTorch for better performance.'
+                            })
+
+                # Check running before processing (stop may have been called)
+                if not self._running:
+                    logger.debug("[mic_rvc] _running is False after dequeue, exiting loop")
+                    break
+
+                # Bail out if buffers were cleared by stop()
+                if self._input_wav is None:
+                    logger.debug("[mic_rvc] _input_wav is None, exiting loop")
+                    break
+
                 # Convert to mono
                 if indata.ndim == 1:
                     mono = indata.astype(np.float32)
@@ -360,6 +422,11 @@ class MicRVCProcessor:
                             pass
                         self._output_queue.put_nowait(silence)
                     continue
+
+                # Check running before heavy RVC inference
+                if not self._running:
+                    logger.debug("[mic_rvc] _running is False before RVC inference, exiting loop")
+                    break
 
                 # Resample full rolling buffer to 16kHz
                 buffer_16k = resample_poly(
@@ -457,11 +524,28 @@ class MicRVCProcessor:
 
                 elapsed = time.perf_counter() - t0
                 if elapsed > self._block_time:
-                    logger.warning(
-                        f"Mic RVC process #{callback_count}: {elapsed:.2f}s "
-                        f"(>{self._block_time:.2f}s block) — latency increasing"
-                    )
-                elif callback_count <= 3 or callback_count % 20 == 0:
+                    self._consecutive_slow += 1
+                    # Log warning but not every single block — first 3, then every 10th
+                    if self._consecutive_slow <= 3 or self._consecutive_slow % 10 == 0:
+                        logger.warning(
+                            f"Mic RVC process #{callback_count}: {elapsed:.2f}s "
+                            f"(>{self._block_time:.2f}s block) — latency increasing "
+                            f"(consecutive slow: {self._consecutive_slow})"
+                        )
+                    # One-time CUDA suggestion after 5 consecutive slow blocks
+                    if self._consecutive_slow == 5 and not self._latency_warned:
+                        self._latency_warned = True
+                        logger.warning(
+                            "Mic RVC: consistently slower than real-time. "
+                            "Install CUDA PyTorch for real-time voice conversion."
+                        )
+                        if self.on_status:
+                            self.on_status('rvc_latency_warning', {
+                                'message': 'RVC is too slow for real-time on CPU. Install CUDA PyTorch for better performance.'
+                            })
+                else:
+                    self._consecutive_slow = 0
+                if callback_count <= 3 or callback_count % 20 == 0:
                     logger.debug(
                         f"Mic RVC process #{callback_count}: {elapsed:.3f}s "
                         f"(block={self._block_time:.2f}s)"

@@ -263,6 +263,34 @@ class QuietHTTPHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         super().end_headers()
 
+    def do_POST(self):
+        """Handle POST requests (e.g. /shutdown)."""
+        if self.path == '/shutdown':
+            logger.info('[HTTP] Received /shutdown POST request')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(b'{"status":"shutting_down"}')
+            # Schedule shutdown after response is sent
+            def _do_shutdown():
+                import time
+                time.sleep(0.5)
+                logger.info('[HTTP] Shutting down via HTTP endpoint')
+                os._exit(0)
+            shutdown_thread = threading.Thread(target=_do_shutdown, daemon=True)
+            shutdown_thread.start()
+            return
+        self.send_error(404, 'Not Found')
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight for POST requests."""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
 
 def find_frontend_dist():
     """Find the frontend dist directory."""

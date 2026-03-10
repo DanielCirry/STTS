@@ -131,7 +131,16 @@ Section "Uninstall"
     RMDir "$SMPROGRAMS\${APPNAME}"
 
     ; Remove user data (models, VOICEVOX, cache, logs) in %APPDATA%\STTS
-    RMDir /r "$APPDATA\STTS"
+    ; BUT preserve settings-backup.json so device selections survive reinstall
+    ; Remove known subdirectories individually instead of wiping the whole folder
+    RMDir /r "$APPDATA\STTS\logs"
+    RMDir /r "$APPDATA\STTS\models"
+    RMDir /r "$APPDATA\STTS\cache"
+    RMDir /r "$APPDATA\STTS\voicevox"
+    ; Delete individual files except settings-backup.json
+    Delete "$APPDATA\STTS\*.log"
+    ; Try to remove the folder — will only succeed if empty (settings-backup.json keeps it)
+    RMDir "$APPDATA\STTS"
 
     ; Remove registry
     DeleteRegKey HKCU "${UNINSTKEY}"

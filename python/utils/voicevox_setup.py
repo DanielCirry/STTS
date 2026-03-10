@@ -42,6 +42,7 @@ class VoicevoxEngineManager:
         self._on_status = on_status or (lambda *_: None)
         self._process: Optional[subprocess.Popen] = None
         self._cancel_requested = False
+        self._start_cancelled = False
         self._run_exe_path: Optional[Path] = None
 
     # ── Status ──────────────────────────────────────────────────────────
@@ -244,13 +245,14 @@ class VoicevoxEngineManager:
             logger.error("Cannot start VOICEVOX: run.exe not found")
             return False
 
+        self._start_cancelled = False
         logger.debug(f"Starting VOICEVOX Engine: {exe}")
         try:
             self._process = subprocess.Popen(
                 [str(exe), '--host', '127.0.0.1', '--port', str(ENGINE_PORT)],
                 cwd=str(exe.parent),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
             )
         except Exception as e:
@@ -261,8 +263,21 @@ class VoicevoxEngineManager:
         timeout = aiohttp.ClientTimeout(total=3)
         for i in range(60):
             await asyncio.sleep(1)
-            if self._process.poll() is not None:
-                logger.error("VOICEVOX process exited prematurely")
+            # Check if stop_engine() was called while we were waiting
+            if self._start_cancelled:
+                logger.debug("VOICEVOX start_engine cancelled by stop_engine()")
+                return False
+            proc = self._process  # local ref — stop_engine may set to None
+            if proc is None:
+                logger.debug("VOICEVOX process was cleared (stop called during start)")
+                return False
+            if proc.poll() is not None:
+                # Capture output to understand why it crashed
+                try:
+                    out = proc.stdout.read().decode('utf-8', errors='ignore')[-2000:] if proc.stdout else ''
+                    logger.error(f"VOICEVOX process exited prematurely (code={proc.returncode}). Output:\n{out}")
+                except Exception:
+                    logger.error(f"VOICEVOX process exited prematurely (code={proc.returncode})")
                 self._process = None
                 return False
             try:
@@ -281,6 +296,7 @@ class VoicevoxEngineManager:
 
     def stop_engine(self):
         """Stop the VOICEVOX Engine process (managed or orphaned)."""
+        self._start_cancelled = True  # abort any in-flight start_engine polling
         # Stop managed process
         if self._process and self._process.poll() is None:
             logger.debug("Stopping managed VOICEVOX Engine")

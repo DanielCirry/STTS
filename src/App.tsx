@@ -9,7 +9,7 @@ import { StatusBar } from '@/components/chat/StatusBar'
 import { useSettingsStore, useChatStore } from '@/stores'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useFeaturesStore } from '@/stores/featuresStore'
-import { useBackend } from '@/hooks/useBackend'
+import { useBackend, isWsConnected } from '@/hooks/useBackend'
 
 type View = 'chat' | 'settings'
 
@@ -76,7 +76,22 @@ function MenuBar({ settings, menuPosition, menuAlignment, isListening, isSpeaker
   return (
     <div className={containerClass}>
       <ToggleControl icon={<Mic className="w-4 h-4" />} label="STT" enabled={isListening} disabled={!connected}
-        onClick={() => { console.log('[App] Toggle STT', { wasListening: isListening }); if (isListening) stopListening(); else startListening() }} />
+        onClick={() => {
+          console.log('[App] Toggle STT', { wasListening: isListening })
+          if (isListening) {
+            stopListening()
+            // Sync persisted setting to match runtime state
+            console.log('[App] STT sidebar OFF → settings.stt.enabled = false')
+            settings.updateSTT({ enabled: false })
+            updateSettings({ stt: { enabled: false } })
+          } else {
+            startListening()
+            // Sync persisted setting to match runtime state
+            console.log('[App] STT sidebar ON → settings.stt.enabled = true')
+            settings.updateSTT({ enabled: true })
+            updateSettings({ stt: { enabled: true } })
+          }
+        }} />
       <ToggleControl icon={<Volume2 className="w-4 h-4" />} label="TTS" enabled={settings.tts.enabled} disabled={!connected}
         onClick={() => { const v = !settings.tts.enabled; console.log('[App] Toggle TTS', v); settings.updateTTS({ enabled: v }); updateSettings({ tts: { enabled: v } }) }} />
 
@@ -112,8 +127,23 @@ function MenuBar({ settings, menuPosition, menuAlignment, isListening, isSpeaker
       <ToggleControl icon={<AudioLines className="w-4 h-4" />} label="Mic→RVC" enabled={isMicRvcActive} disabled={!connected || !isRvcModelLoaded}
         onClick={() => {
           console.log('[App] Toggle Mic→RVC', { wasActive: isMicRvcActive })
-          if (isMicRvcActive) { useChatStore.getState().setMicRvcActive(false); sendMessage({ type: 'rvc_mic_stop' }) }
-          else { useChatStore.getState().setMicRvcActive(true); sendMessage({ type: 'rvc_mic_start', payload: { output_device_id: settings.rvc.micRvcOutputDeviceId } }) }
+          if (isMicRvcActive) {
+            console.log('[App] Sending rvc_mic_stop')
+            sendMessage({ type: 'rvc_mic_stop' })
+            // 5s timeout: if backend doesn't confirm stop, force-reset UI
+            const stopTimeout = setTimeout(() => {
+              if (useChatStore.getState().isMicRvcActive) {
+                console.warn('[App] Mic RVC stop timeout (5s) — force-resetting UI state')
+                useChatStore.getState().setMicRvcActive(false)
+                useNotificationStore.getState().addToast('Mic RVC stop timed out — UI reset. Backend may still be processing.', 'warning')
+              }
+            }, 5000)
+            // Store timeout so it can be cleared if backend confirms quickly
+            ;(window as Record<string, unknown>).__micRvcStopTimeout = stopTimeout
+          } else {
+            useChatStore.getState().setMicRvcActive(true)
+            sendMessage({ type: 'rvc_mic_start', payload: { output_device_id: settings.rvc.micRvcOutputDeviceId } })
+          }
         }} />
       <ToggleControl icon={<Music className="w-4 h-4" />} label="TTS→RVC" enabled={settings.rvc.enabled} disabled={!connected || !isRvcModelLoaded}
         onClick={() => { const v = !settings.rvc.enabled; console.log('[App] Toggle TTS→RVC', v); settings.updateRVC({ enabled: v }); sendMessage({ type: 'rvc_enable', payload: { enabled: v } }) }} />
@@ -123,7 +153,21 @@ function MenuBar({ settings, menuPosition, menuAlignment, isListening, isSpeaker
       <button onClick={() => { console.log('[App] Open Settings'); setCurrentView('settings') }} className="p-3 rounded-lg hover:bg-secondary transition-colors" title="Settings">
         <Settings className="w-5 h-5" />
       </button>
-      <button onClick={() => { console.log('[App] Quit STTS'); sendMessage({ type: 'shutdown' }); setTimeout(() => window.close(), 500) }} className="p-3 rounded-lg hover:bg-red-500/20 transition-colors text-muted-foreground hover:text-red-400" title="Quit STTS">
+      <button onClick={() => {
+        console.log('[App] Quit STTS, wsConnected:', isWsConnected())
+        if (isWsConnected()) {
+          console.log('[App] Sending shutdown via WebSocket')
+          sendMessage({ type: 'shutdown' })
+        } else {
+          console.log('[App] WS not connected, sending shutdown via HTTP fallback')
+          fetch('/shutdown', { method: 'POST' }).then(r => {
+            console.log('[App] HTTP shutdown response:', r.status)
+          }).catch(err => {
+            console.error('[App] HTTP shutdown failed:', err)
+          })
+        }
+        setTimeout(() => window.close(), 500)
+      }} className="p-3 rounded-lg hover:bg-red-500/20 transition-colors text-muted-foreground hover:text-red-400" title="Quit STTS">
         <Power className="w-5 h-5" />
       </button>
     </div>
@@ -163,7 +207,7 @@ function App() {
     }
   }, [editingPairId])
 
-  // On first run (no features installed), go to Features page
+  // On first run (no features installed) or pending install queue, go to Features page
   const featuresStatus = useFeaturesStore(s => s.status)
   const firstRunChecked = useRef(false)
   useEffect(() => {
@@ -171,17 +215,23 @@ function App() {
     if (!featuresStatus?.features) return
     firstRunChecked.current = true
     const anyInstalled = Object.values(featuresStatus.features).some(f => f.installed)
-    if (!anyInstalled) {
+    const hasPendingQueue = useFeaturesStore.getState().pendingInstallQueue.length > 0
+    if (!anyInstalled || hasPendingQueue) {
+      console.log('[App] Navigating to features page:', !anyInstalled ? 'first run' : 'pending install queue')
       navigateToSettings('features')
     }
   }, [featuresStatus])
 
   // Sync frontend settings to backend on initial connect only.
-  // Individual setting controls send their own update_settings messages,
-  // so this should NOT re-fire on every settings change (causes infinite loops
-  // when backend responds with settings_updated → store update → re-sync).
+  // Skip entirely on first run when no features are installed (prevents errors).
   useEffect(() => {
     if (connected) {
+      const features = useFeaturesStore.getState().status?.features
+      const anyInstalled = features && Object.values(features).some(f => f.installed)
+      if (!anyInstalled) {
+        console.log('[App] First run — no features installed, skipping settings sync')
+        return
+      }
       const s = useSettingsStore.getState()
       updateSettings({
         ai: {
@@ -214,6 +264,12 @@ function App() {
   // Auto-load translator model when translation is enabled (only for local provider)
   useEffect(() => {
     if (connected && settings.translation.enabled && settings.translation.provider === 'local') {
+      // Skip if translation feature isn't installed
+      const features = useFeaturesStore.getState().status?.features
+      if (!features?.['translation']?.installed) {
+        console.log('[App] Translation not installed, skipping model load')
+        return
+      }
       // Fix stale default model name from older settings
       const validModels = ['nllb-200-distilled-600M', 'nllb-200-distilled-1.3B', 'nllb-200-3.3B']
       const modelId = validModels.includes(settings.translation.model)

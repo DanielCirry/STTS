@@ -1508,11 +1508,21 @@ class STTSEngine:
                 self._audio_manager.vad_enabled = audio_settings['vad_enabled']
             if 'vad_sensitivity' in audio_settings:
                 self._audio_manager.vad_sensitivity = audio_settings['vad_sensitivity']
+            if 'noise_gate_threshold' in audio_settings:
+                threshold = float(audio_settings['noise_gate_threshold'])
+                self._audio_manager.noise_gate_threshold = threshold
+                logger.info(f"[audio] Noise gate threshold set to {threshold}")
             if 'enableNoiseSuppression' in audio_settings:
-                # Enable/disable noise gate (0.005 threshold when on, 0 when off)
+                # Enable/disable noise gate — use stored threshold or default 0.005
                 enabled = audio_settings['enableNoiseSuppression']
-                self._audio_manager.noise_gate_threshold = 0.005 if enabled else 0.0
-                logger.info(f"[audio] Noise gate {'enabled (0.005)' if enabled else 'disabled'}")
+                if not enabled:
+                    self._audio_manager.noise_gate_threshold = 0.0
+                    logger.info("[audio] Noise gate disabled")
+                else:
+                    # If no explicit threshold provided, use current or default
+                    if self._audio_manager.noise_gate_threshold == 0.0:
+                        self._audio_manager.noise_gate_threshold = 0.005
+                    logger.info(f"[audio] Noise gate enabled (threshold={self._audio_manager.noise_gate_threshold})")
 
         # Apply TTS settings
         if self._tts and 'tts' in settings:
@@ -2473,6 +2483,42 @@ class STTSEngine:
             logger.error(f"[llm] Failed to unload LLM: {e}")
             return False
 
+    def unload_stt(self) -> bool:
+        """Unload the current STT (Whisper) model to free memory."""
+        if not self._stt:
+            logger.warning("[stt] No STT instance to unload")
+            return False
+        try:
+            if self._stt.is_loaded:
+                model_name = self._stt.model_name or 'unknown'
+                self._stt.unload_model()
+                logger.info(f"[stt] STT model '{model_name}' unloaded successfully")
+                return True
+            else:
+                logger.info("[stt] No STT model currently loaded")
+                return True
+        except Exception as e:
+            logger.error(f"[stt] Failed to unload STT model: {e}")
+            return False
+
+    def unload_translation(self) -> bool:
+        """Unload the current translation (NLLB) model to free memory."""
+        if not self._translator:
+            logger.warning("[translation] No translator instance to unload")
+            return False
+        try:
+            if self._translator.is_loaded:
+                model_name = self._translator.current_model or 'unknown'
+                self._translator.unload_model()
+                logger.info(f"[translation] Translation model '{model_name}' unloaded successfully")
+                return True
+            else:
+                logger.info("[translation] No translation model currently loaded")
+                return True
+        except Exception as e:
+            logger.error(f"[translation] Failed to unload translation model: {e}")
+            return False
+
     def get_local_models_directory(self) -> str:
         """Get the current local models directory.
 
@@ -2914,8 +2960,12 @@ class STTSEngine:
 
     async def mic_rvc_stop(self):
         """Stop real-time mic voice conversion."""
+        logger.info("[mic_rvc_stop] Called, _mic_rvc=%s, is_running=%s",
+                     self._mic_rvc is not None,
+                     self._mic_rvc.is_running if self._mic_rvc else 'N/A')
         if self._mic_rvc:
             self._mic_rvc.stop()
+            logger.info("[mic_rvc_stop] stop() returned, is_running=%s", self._mic_rvc.is_running)
 
         if self._audio_manager:
             self._audio_manager.on_mic_rvc_data = None
@@ -2924,6 +2974,7 @@ class STTSEngine:
             if not self.listening and self._audio_manager.is_recording:
                 self._audio_manager.stop_microphone()
 
+        logger.info("[mic_rvc_stop] Broadcasting rvc_mic_stopped")
         await self.broadcast(create_event(EventType.RVC_MIC_STOPPED, {}))
 
     async def mic_rvc_set_output_device(self, device_id: Optional[int]):
@@ -2938,7 +2989,11 @@ class STTSEngine:
         The frontend sends 'cuda' for any GPU; we translate to DirectML
         when that's what's actually installed (AMD/Intel GPUs).
         """
-        import torch
+        try:
+            import torch
+        except ImportError:
+            logger.debug("[rvc_set_device] torch not installed, ignoring device change")
+            return
 
         # Auto-detect: if 'cuda' requested but unavailable, try DirectML
         if device_str == 'cuda' and not torch.cuda.is_available():

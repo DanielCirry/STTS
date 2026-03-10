@@ -41,7 +41,7 @@ FEATURES = {
     },
     'translation': {
         'name': 'Translation (NLLB)',
-        'packages': ['transformers>=4.35.0', 'sentencepiece>=0.1.99'],
+        'packages': ['transformers>=4.35.0,<4.46.0', 'sentencepiece>=0.1.99'],
         'check_import': 'transformers',
         'requires_torch': True,
         'description': 'Offline translation for 200+ languages (~50 MB)',
@@ -56,7 +56,7 @@ FEATURES = {
     },
     'rvc': {
         'name': 'RVC Voice Conversion',
-        'packages': ['scipy>=1.10.0', 'faiss-cpu>=1.7.3', 'librosa>=0.9.2,<0.11.0', 'soundfile>=0.12.1', 'pydub>=0.25.1', 'transformers>=4.35.0'],
+        'packages': ['scipy>=1.10.0', 'faiss-cpu>=1.7.3', 'librosa>=0.9.2,<0.11.0', 'soundfile>=0.12.1', 'pydub>=0.25.1', 'transformers>=4.35.0,<4.46.0'],
         'check_import': 'scipy',
         'requires_torch': True,
         'description': 'Real-time voice conversion + base models (~550 MB)',
@@ -414,8 +414,12 @@ def check_feature(feature_id: str) -> bool:
         return _check_venv_package(pip_name)
 
     try:
-        __import__(check)
-        return True
+        # Clear cached import so we detect actual uninstalls
+        # (sys.modules retains modules even after pip uninstall)
+        sys.modules.pop(check, None)
+        import importlib.util
+        spec = importlib.util.find_spec(check)
+        return spec is not None
     except Exception:
         return False
 
@@ -525,6 +529,17 @@ async def install_feature(
         return {'success': False, 'error': f'Unknown feature: {feature_id}'}
 
     feature = FEATURES[feature_id]
+
+    # Problem 3 fix: Check if already installed and return success immediately
+    if check_feature(feature_id):
+        logger.info(f"Feature '{feature_id}' is already installed, skipping pip install")
+        if progress_callback:
+            await progress_callback({
+                'feature': feature_id,
+                'stage': 'complete',
+                'detail': f'{feature["name"]} already installed',
+            })
+        return {'success': True, 'feature': feature_id}
 
     # Check if torch is required but not installed
     if feature['requires_torch'] and not check_feature('torch_cpu'):
@@ -671,7 +686,12 @@ async def uninstall_feature(
             'detail': f'Removing {feature["name"]}...',
         })
 
-    cmd = [pip, 'uninstall', '-y'] + feature['packages']
+    # Strip version specifiers — pip uninstall only takes bare package names
+    bare_names = [
+        pkg.split('>=')[0].split('>')[0].split('<')[0].split('==')[0].split('[')[0].strip()
+        for pkg in feature['packages']
+    ]
+    cmd = [pip, 'uninstall', '-y'] + bare_names
 
     try:
         logger.debug(f"Running: {' '.join(cmd)}")
@@ -691,6 +711,13 @@ async def uninstall_feature(
                 output_lines.append(decoded)
 
         await process.wait()
+        logger.info(f"Uninstall pip exit code: {process.returncode}, output: {output_lines}")
+
+        # Verify the package is actually gone
+        pip_name = feature['packages'][0].split('>=')[0].split('<')[0].split('==')[0].split('[')[0].strip()
+        still_installed = _check_venv_package(pip_name)
+        if still_installed:
+            logger.warning(f"Package {pip_name} still has .dist-info after uninstall!")
 
         if progress_callback:
             await progress_callback({
@@ -699,7 +726,7 @@ async def uninstall_feature(
                 'detail': f'{feature["name"]} removed',
             })
 
-        return {'success': True, 'feature': feature_id}
+        return {'success': not still_installed, 'feature': feature_id, 'error': f'{pip_name} still present after pip uninstall' if still_installed else None}
 
     except Exception as e:
         logger.error(f"Uninstall failed: {e}")

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useBackend } from '@/hooks/useBackend'
 import { useFeaturesStore } from '@/stores/featuresStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useChatStore } from '@/stores/chatStore'
 
 const FEATURES = [
   { id: 'torch_cpu', name: 'PyTorch', description: 'Required for STT, Translation & RVC. Switching CPU/CUDA will restart the app.', torchPick: true },
@@ -10,6 +11,7 @@ const FEATURES = [
   { id: 'local_llm', name: 'Local LLM (llama.cpp)', description: 'Run AI models locally (~50 MB)' },
   { id: 'rvc', name: 'RVC Voice Conversion', description: 'Real-time voice conversion + base models (~550 MB)' },
   { id: 'piper_tts', name: 'Piper TTS (Offline)', description: 'Offline text-to-speech engine (~150 MB)' },
+  { id: 'ocr', name: 'OCR Text Recognition', description: 'Screen text recognition for VR Translation (EasyOCR ~150 MB)' },
 ]
 
 // Estimate progress from pip output keywords — parse real percentages when available
@@ -31,9 +33,9 @@ function estimateProgress(detail: string): number {
   return 0.3
 }
 
-// VOICEVOX session state (persists across page navigations)
+// VOICEVOX session state (persists across page navigations within session)
+// Note: vvInstalled is now persisted in Zustand featuresStore (Problem 2 fix)
 const vvSession = {
-  installed: null as boolean | null,
   engineRunning: false,
   installPath: '',
   setupProgress: null as { stage: string; progress: number; detail: string } | null,
@@ -41,41 +43,48 @@ const vvSession = {
 }
 
 // Persist across page navigations within session
+// Note: results are now persisted in Zustand featuresStore.cachedResults (Problem 1 fix)
 const session = {
   queue: [] as string[],
   active: null as string | null,
   progress: {} as Record<string, number>, // 0-1
-  results: {} as Record<string, 'success' | 'error'>,
   errorMsg: null as string | null,
 }
 
 export default function FeaturesManager() {
   const { sendMessage, lastMessage, connected } = useBackend()
   const featuresStatus = useFeaturesStore(s => s.status)
+  const cachedResults = useFeaturesStore(s => s.cachedResults)
+  const statusReceived = useFeaturesStore(s => s.statusReceived)
   const installProgress = useFeaturesStore(s => s.installProgress)
   const installResult = useFeaturesStore(s => s.installResult)
   const uninstallResult = useFeaturesStore(s => s.uninstallResult)
+  const storedVvInstalled = useFeaturesStore(s => s.voicevoxInstalled)
   const updateTTS = useSettingsStore(s => s.updateTTS)
   const [queue, setQueue] = useState<string[]>(session.queue)
   const [active, setActive] = useState<string | null>(session.active)
   const [progress, setProgress] = useState<Record<string, number>>(session.progress)
-  const [results, setResults] = useState<Record<string, 'success' | 'error'>>(session.results)
+  // Problem 1 fix: Initialize results from persisted cachedResults so they survive page refresh
+  const [results, setResults] = useState<Record<string, 'success' | 'error'>>(() => {
+    console.log('[Features] Initializing results from cachedResults:', JSON.stringify(cachedResults))
+    return { ...cachedResults }
+  })
   const [errorMsg, setErrorMsg] = useState<string | null>(session.errorMsg)
   const [restartNeeded, setRestartNeeded] = useState(false)
   const activeRef = useRef(active)
   const queueRef = useRef(queue)
   const checkedRef = useRef(false)
 
-  // VOICEVOX Engine state
-  const [vvInstalled, setVvInstalled] = useState<boolean | null>(vvSession.installed)
+  // VOICEVOX Engine state — Problem 2 fix: init from persisted Zustand store, not module-level var
+  const [vvInstalled, setVvInstalled] = useState<boolean | null>(storedVvInstalled)
   const [vvEngineRunning, setVvEngineRunning] = useState(vvSession.engineRunning)
   const [vvInstallPath, setVvInstallPath] = useState(vvSession.installPath)
   const [vvSetupProgress, setVvSetupProgress] = useState<{ stage: string; progress: number; detail: string } | null>(vvSession.setupProgress)
   const [vvBuildType, setVvBuildType] = useState<'directml' | 'cpu'>(vvSession.buildType)
 
-  // Sync VOICEVOX session state + global store
+  // Sync VOICEVOX state to global store (persisted)
   useEffect(() => {
-    vvSession.installed = vvInstalled
+    console.log('[Features] VOICEVOX installed state changed:', vvInstalled)
     useFeaturesStore.getState().setVoicevoxInstalled(vvInstalled)
   }, [vvInstalled])
   useEffect(() => { vvSession.engineRunning = vvEngineRunning }, [vvEngineRunning])
@@ -86,6 +95,9 @@ export default function FeaturesManager() {
   // Check installed status on mount and when connection establishes
   useEffect(() => {
     if (!connected) return
+    console.log('[Features] Connected, requesting features_status. statusReceived:', statusReceived)
+    // Problem 3 fix: Reset statusReceived so UI shows "Checking..." until backend responds
+    useFeaturesStore.getState().setStatusReceived(false)
     sendMessage({ type: 'get_features_status' })
     // If we had an active install but navigated away, clear stale state
     // The features_status response will set correct results
@@ -98,7 +110,7 @@ export default function FeaturesManager() {
     }
   }, [connected, sendMessage])
 
-  // Check VOICEVOX install status on mount — also reset stale progress
+  // Problem 2 fix: Check VOICEVOX install status on mount — use persisted store for timeout check
   useEffect(() => {
     if (!connected) return
     // Clear stale extracting/downloading progress on re-mount
@@ -106,12 +118,22 @@ export default function FeaturesManager() {
     if (vvSetupProgress && !vvSetupProgress.stage) {
       setVvSetupProgress(null)
     }
+    console.log('[Features] Checking VOICEVOX install status, persisted value:', storedVvInstalled)
     sendMessage({ type: 'voicevox_check_install' })
-    // Timeout: if still null (checking) after 10s, assume not installed
+    // Timeout: if still null (checking) after 10s, re-send check then fall back
     const timeout = setTimeout(() => {
-      if (vvSession.installed === null) {
-        console.log('[Features] VOICEVOX check timed out, assuming not installed')
-        setVvInstalled(false)
+      const currentVv = useFeaturesStore.getState().voicevoxInstalled
+      if (currentVv === null) {
+        console.log('[Features] VOICEVOX check timed out (10s), re-sending voicevox_check_install')
+        sendMessage({ type: 'voicevox_check_install' })
+        // Final timeout — if still null after another 5s, assume not installed
+        setTimeout(() => {
+          const finalVv = useFeaturesStore.getState().voicevoxInstalled
+          if (finalVv === null) {
+            console.log('[Features] VOICEVOX check timed out (15s total), assuming not installed')
+            setVvInstalled(false)
+          }
+        }, 5000)
       }
     }, 10000)
     return () => clearTimeout(timeout)
@@ -122,6 +144,7 @@ export default function FeaturesManager() {
     if (!lastMessage) return
     if (lastMessage.type === 'voicevox_setup_status') {
       const p = lastMessage.payload as { installed?: boolean; install_path?: string; engine_running?: boolean }
+      console.log('[Features] voicevox_setup_status received:', JSON.stringify(p))
       setVvInstalled(p.installed ?? false)
       setVvEngineRunning(p.engine_running ?? false)
       if (p.install_path) setVvInstallPath(p.install_path)
@@ -150,16 +173,27 @@ export default function FeaturesManager() {
     } else if (lastMessage.type === 'voicevox_engine_status') {
       const p = lastMessage.payload as { running?: boolean }
       setVvEngineRunning(p.running ?? false)
+      // Clear "Starting..." progress when engine status arrives
+      if (vvSetupProgress?.stage === 'starting') {
+        setVvSetupProgress(null)
+      }
     }
   }, [lastMessage, sendMessage])
 
   // React to featuresStatus from Zustand store (set by handleGlobalMessage)
   useEffect(() => {
     if (!featuresStatus?.features) return
+    console.log('[Features] featuresStatus received, syncing results. Features:', Object.keys(featuresStatus.features))
+    const recentlyUninstalled = useFeaturesStore.getState().recentlyUninstalled
     const newResults: Record<string, 'success' | 'error'> = {}
     // Sync results with backend truth — only mark 'success' if backend says installed
     for (const [fid, info] of Object.entries(featuresStatus.features)) {
       if (info.installed) {
+        // Don't re-mark features that were just uninstalled
+        if (recentlyUninstalled.has(fid)) {
+          console.log('[Features] Skipping recently uninstalled feature:', fid)
+          continue
+        }
         newResults[fid] = 'success'
       }
     }
@@ -169,7 +203,10 @@ export default function FeaturesManager() {
         newResults[fid] = res
       }
     }
+    console.log('[Features] Setting results from backend:', JSON.stringify(newResults))
     setResults(newResults)
+    // Problem 1 fix: Also update the persisted cache in Zustand
+    useFeaturesStore.getState().setCachedResults(newResults)
     // Clear stale active state — if no recent progress, nothing is really installing
     const act = activeRef.current
     if (act) {
@@ -183,11 +220,41 @@ export default function FeaturesManager() {
     }
   }, [featuresStatus])
 
+  // Resume pending install queue after restart (e.g., torch installed → restart → continue remaining)
+  const resumeCheckedRef = useRef(false)
+  useEffect(() => {
+    if (resumeCheckedRef.current) return
+    if (!featuresStatus?.features || !connected) return
+    const pendingQueue = useFeaturesStore.getState().pendingInstallQueue
+    if (pendingQueue.length === 0) return
+    // Only resume if not already installing something
+    if (active || queue.length > 0) return
+    resumeCheckedRef.current = true
+    // Filter out features that are already installed
+    const remaining = pendingQueue.filter(fid => {
+      const installed = featuresStatus.features[fid]?.installed
+        || (fid === 'torch_cpu' && featuresStatus.features['torch_cuda']?.installed)
+        || (fid === 'torch_cuda' && featuresStatus.features['torch_cpu']?.installed)
+      return !installed
+    })
+    console.log('[Features] Resuming pending install queue after restart:', remaining, '(was:', pendingQueue, ')')
+    useFeaturesStore.getState().clearPendingInstallQueue()
+    if (remaining.length === 0) return
+    // Start installing the remaining features
+    const [first, ...rest] = remaining
+    setActive(first)
+    setProgress(p => ({ ...p, [first]: 0.05 }))
+    sendMessage({ type: 'install_feature', payload: { feature_id: first } })
+    if (rest.length > 0) {
+      setQueue(rest)
+      for (const r of rest) setProgress(p => ({ ...p, [r]: 0 }))
+    }
+  }, [featuresStatus, connected, active, queue, sendMessage])
+
   // Sync refs and session
   useEffect(() => { activeRef.current = active; session.active = active }, [active])
   useEffect(() => { queueRef.current = queue; session.queue = queue }, [queue])
   useEffect(() => { session.progress = progress }, [progress])
-  useEffect(() => { session.results = results }, [results])
   useEffect(() => { session.errorMsg = errorMsg }, [errorMsg])
 
   const startNext = useCallback((currentQueue: string[]) => {
@@ -218,6 +285,9 @@ export default function FeaturesManager() {
       if (installResult.success) {
         setProgress(p => ({ ...p, [fid]: 1 }))
         setResults(r => ({ ...r, [fid]: 'success' }))
+        // Problem 1 fix: Persist install result to Zustand store
+        console.log('[Features] Updating cachedResult for', fid, 'to success')
+        useFeaturesStore.getState().updateCachedResult(fid, 'success')
         if (installResult.restart_needed) {
           console.log('[Features] Restart needed after installing:', fid)
           setRestartNeeded(true)
@@ -225,6 +295,7 @@ export default function FeaturesManager() {
       } else {
         setProgress(p => ({ ...p, [fid]: 0 }))
         setResults(r => ({ ...r, [fid]: 'error' }))
+        useFeaturesStore.getState().updateCachedResult(fid, 'error')
         setErrorMsg(installResult.error || 'Installation failed')
       }
     }
@@ -240,13 +311,14 @@ export default function FeaturesManager() {
     }
   }, [installResult, startNext])
 
-  // Auto-restart when queue empties and restart was requested (torch installed)
+  // Auto-restart when torch install completes and restart was requested
+  // Remaining features are saved in persistedQueue and will resume after restart
   useEffect(() => {
-    if (restartNeeded && !active && queue.length === 0) {
-      console.log('[Features] All installs done, triggering restart for GPU support')
+    if (restartNeeded && !active) {
+      console.log('[Features] Torch installed, triggering restart. Remaining features will resume after restart.')
       sendMessage({ type: 'restart_app' })
     }
-  }, [restartNeeded, active, queue, sendMessage])
+  }, [restartNeeded, active, sendMessage])
 
   // Handle uninstall result from store
   useEffect(() => {
@@ -258,6 +330,8 @@ export default function FeaturesManager() {
         console.log('[Features] Uninstall success:', fid)
         setResults(r => { const copy = { ...r }; delete copy[fid]; return copy })
         setProgress(p => { const copy = { ...p }; delete copy[fid]; return copy })
+        // Problem 1 fix: Remove from persisted cache
+        useFeaturesStore.getState().removeCachedResult(fid)
         // Clear persisted settings for uninstalled features
         if (fid === 'rvc') {
           useSettingsStore.getState().updateRVC({ modelPath: null, indexPath: null, enabled: false, recentModels: [] })
@@ -334,18 +408,43 @@ export default function FeaturesManager() {
 
   const installAll = () => {
     console.log('[Features] Install All clicked')
-    // Queue all uninstalled features (skip torch — default to CPU)
+    // Always default to CUDA torch — most users have NVIDIA GPUs and CUDA falls back gracefully.
+    // Users without GPU can click the individual CPU button instead.
+    const torchVariant = 'torch_cuda'
+    console.log('[Features] Install All: defaulting torch to', torchVariant)
     const toInstall: string[] = []
     for (const feature of FEATURES) {
       const fid = feature.id
-      const effectiveId = feature.torchPick ? 'torch_cpu' : fid
+      const effectiveId = feature.torchPick ? torchVariant : fid
       const result = results[fid] || (feature.torchPick ? (results['torch_cpu'] || results['torch_cuda']) : undefined)
       if (result !== 'success' && !queue.includes(effectiveId) && active !== effectiveId) {
         toInstall.push(effectiveId)
       }
     }
     if (toInstall.length === 0) return
-    // Start first, queue rest
+
+    // If torch is in the list, install ONLY torch first — it requires a restart.
+    // Save the rest to a persisted queue so they auto-install after restart.
+    const torchIdx = toInstall.findIndex(id => id === 'torch_cpu' || id === 'torch_cuda')
+    if (torchIdx >= 0) {
+      const torchId = toInstall[torchIdx]
+      const remaining = toInstall.filter((_, i) => i !== torchIdx)
+      console.log('[Features] Torch needs restart — installing only torch first, saving remaining:', remaining)
+      // Persist the remaining queue for after restart
+      useFeaturesStore.getState().setPendingInstallQueue(remaining)
+      // Start torch install immediately
+      if (!active) {
+        setActive(torchId)
+        setProgress(p => ({ ...p, [torchId]: 0.05 }))
+        sendMessage({ type: 'install_feature', payload: { feature_id: torchId } })
+      } else {
+        setQueue(q => [...q, torchId])
+        setProgress(p => ({ ...p, [torchId]: 0 }))
+      }
+      return
+    }
+
+    // No torch needed — install everything normally
     if (!active) {
       const [first, ...rest] = toInstall
       setActive(first)
@@ -366,6 +465,9 @@ export default function FeaturesManager() {
     return r === 'success'
   })
 
+  // Problem 3 fix: Track whether we're waiting for backend status (show "Checking..." instead of "Install")
+  const isPendingStatus = connected && !statusReceived
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px' }}>
@@ -375,15 +477,15 @@ export default function FeaturesManager() {
         {!allInstalled && (
           <button
             onClick={installAll}
-            disabled={!!active}
+            disabled={!!active || isPendingStatus}
             style={{
               ...btnStyle,
               fontSize: 12,
               padding: '4px 14px',
-              opacity: active ? 0.5 : 1,
+              opacity: (active || isPendingStatus) ? 0.5 : 1,
             }}
           >
-            Install All
+            {isPendingStatus ? 'Checking...' : 'Install All'}
           </button>
         )}
       </div>
@@ -403,7 +505,18 @@ export default function FeaturesManager() {
 
       {FEATURES.map(feature => {
         const fid = feature.id
-        const torchId = feature.torchPick ? (results['torch_cuda'] ? 'torch_cuda' : 'torch_cpu') : null
+        // Determine actual torch variant from backend version string (e.g. "2.1.0+cu121" → CUDA, "2.1.0+cpu" → CPU)
+        const torchVersion = featuresStatus?.features?.['torch_cpu']?.version || featuresStatus?.features?.['torch_cuda']?.version || ''
+        const torchIsCuda = torchVersion.includes('+cu') ? true
+          : torchVersion.includes('+cpu') ? false
+          : !!results['torch_cuda']  // fallback to results-based detection
+        const torchVariantLabel = torchIsCuda ? 'CUDA' : 'CPU'
+        const torchInstalledId = torchIsCuda ? 'torch_cuda' : 'torch_cpu'
+        const torchSwitchId = torchIsCuda ? 'torch_cpu' : 'torch_cuda'
+        if (feature.torchPick && torchVersion) {
+          console.log('[Features] Torch version from backend:', torchVersion, '→ variant:', torchVariantLabel)
+        }
+        const torchId = feature.torchPick ? torchInstalledId : null
         const effectiveId = torchId || fid
         const isActive = active === effectiveId || (feature.torchPick && (active === 'torch_cpu' || active === 'torch_cuda'))
         const isQueued = queue.includes(effectiveId) || (feature.torchPick && (queue.includes('torch_cpu') || queue.includes('torch_cuda')))
@@ -456,22 +569,23 @@ export default function FeaturesManager() {
               {result === 'success' ? (
                 feature.torchPick ? (
                   // Allow switching torch variant even after install
+                  // torchVariantLabel / torchInstalledId / torchSwitchId computed above from backend version string
                   <>
                     <span style={{ color: '#4a8', fontSize: 13, marginRight: 4 }}>
-                      {results['torch_cuda'] ? 'CUDA' : 'CPU'}
+                      {torchVariantLabel}
                     </span>
                     <button
-                      onClick={() => install(results['torch_cuda'] ? 'torch_cpu' : 'torch_cuda')}
+                      onClick={() => { console.log('[Features] Switch torch to', torchSwitchId); install(torchSwitchId) }}
                       disabled={!!active}
                       style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', opacity: active ? 0.3 : 0.7, cursor: active ? 'not-allowed' : 'pointer' }}>
-                      Switch to {results['torch_cuda'] ? 'CPU' : 'CUDA'}
+                      Switch to {torchIsCuda ? 'CPU' : 'CUDA'}
                     </button>
                     <button
-                      onClick={() => { console.log('[Features] Uninstall X clicked for torch'); uninstall(results['torch_cuda'] ? 'torch_cuda' : 'torch_cpu') }}
+                      onClick={() => { console.log('[Features] Uninstall X clicked for torch:', torchInstalledId); uninstall(torchInstalledId) }}
                       disabled={!!uninstalling}
                       title="Uninstall"
-                      style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', background: '#433', borderColor: '#644', color: uninstalling === (results['torch_cuda'] ? 'torch_cuda' : 'torch_cpu') ? '#aa8833' : '#c88' }}>
-                      {uninstalling === (results['torch_cuda'] ? 'torch_cuda' : 'torch_cpu') ? '...' : '✕'}
+                      style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', background: '#433', borderColor: '#644', color: uninstalling === torchInstalledId ? '#aa8833' : '#c88' }}>
+                      {uninstalling === torchInstalledId ? '...' : '✕'}
                     </button>
                   </>
                 ) : (
@@ -504,6 +618,9 @@ export default function FeaturesManager() {
                 <span style={{ color: '#aa8833', fontSize: 13 }}>Installing...</span>
               ) : isQueued ? (
                 <span style={{ color: '#888', fontSize: 13 }}>Queued</span>
+              ) : isPendingStatus && !result ? (
+                // Problem 3 fix: Show "Checking..." while waiting for backend features_status
+                <span style={{ color: '#888', fontSize: 13 }}>Checking...</span>
               ) : feature.torchPick ? (
                 <>
                   <button onClick={() => install('torch_cpu')} disabled={!!active && !isActive}
@@ -589,12 +706,16 @@ export default function FeaturesManager() {
                 </span>
                 {!vvEngineRunning ? (
                   <button
-                    onClick={() => { console.log('[Features] VOICEVOX Start Engine'); sendMessage({ type: 'voicevox_start_engine' }) }}
+                    onClick={() => {
+                      console.log('[Features] VOICEVOX Start Engine')
+                      setVvSetupProgress({ stage: 'starting', progress: 0, detail: 'Starting VOICEVOX Engine...' })
+                      sendMessage({ type: 'voicevox_start_engine' })
+                    }}
                     style={{ ...btnStyle, fontSize: 11, padding: '2px 8px' }}
                   >Start</button>
                 ) : (
                   <button
-                    onClick={() => { console.log('[Features] VOICEVOX Stop Engine'); sendMessage({ type: 'voicevox_stop_engine' }) }}
+                    onClick={() => { console.log('[Features] VOICEVOX Stop Engine'); setVvSetupProgress(null); sendMessage({ type: 'voicevox_stop_engine' }) }}
                     style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', opacity: 0.7 }}
                   >Stop</button>
                 )}
@@ -605,6 +726,14 @@ export default function FeaturesManager() {
                     sendMessage({ type: 'voicevox_uninstall_engine' })
                     setVvInstalled(false)
                     setVvEngineRunning(false)
+                    // Switch TTS engine away from voicevox and clear stale voices
+                    const currentEngine = useSettingsStore.getState().tts.engine
+                    if (currentEngine === 'voicevox') {
+                      console.log('[Features] VOICEVOX uninstalled — switching TTS engine to piper')
+                      useSettingsStore.getState().updateTTS({ engine: 'piper' })
+                      sendMessage({ type: 'update_settings', payload: { tts: { engine: 'piper' } } })
+                    }
+                    useChatStore.getState().setTtsVoices([])
                   }}
                   title="Uninstall"
                   style={{ ...btnStyle, fontSize: 11, padding: '2px 8px', background: '#433', borderColor: '#644', color: '#c88' }}

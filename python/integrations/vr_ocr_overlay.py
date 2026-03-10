@@ -517,10 +517,11 @@ class VROCROverlay:
             overlay = openvr.IVROverlay()
 
             if enabled:
+                # Show the OCR button when enabled
                 if self._button_handle:
                     overlay.showOverlay(self._button_handle)
             else:
-                # Hide everything
+                # Hide ALL overlays including button when disabled
                 for handle in [self._button_handle, self._region_handle,
                                 self._camera_handle, self._translation_handle,
                                 self._close_handle] + self._corner_handles:

@@ -84,6 +84,8 @@ class EventType(str, Enum):
 
     # Settings
     SETTINGS_UPDATED = 'settings_updated'
+    SETTINGS_BACKUP_SAVED = 'settings_backup_saved'
+    SETTINGS_BACKUP_LOADED = 'settings_backup_loaded'
 
 
 def create_event(event_type: EventType, payload: Dict[str, Any]) -> Dict[str, Any]:

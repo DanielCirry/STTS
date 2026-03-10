@@ -221,44 +221,178 @@ class Translator:
             self.model = None
             return False
 
-        # Step 5: Load model (use safetensors to avoid torch.load CVE-2025-32434)
+        # Step 5: Load model — try safetensors first, fall back to pytorch .bin
         try:
-            logger.debug(f"[translate] Step 5: Loading model {hf_name} on {device} (safetensors)...")
-            kwargs = {'use_safetensors': True}
+            logger.debug(f"[translate] Step 5: Loading model {hf_name} on {device}...")
+            kwargs = {}
             if device == 'cuda':
                 kwargs['dtype'] = torch.float16
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(hf_name, **kwargs)
-            self.model = self.model.to(device)
+
+            # Try safetensors first, then fall back to regular pytorch format
+            load_attempts = [
+                {'use_safetensors': True, **kwargs},
+                {'use_safetensors': False, **kwargs},
+            ]
+            load_ok = False
+            for attempt_idx, attempt_kwargs in enumerate(load_attempts):
+                fmt = 'safetensors' if attempt_kwargs.get('use_safetensors') else 'pytorch'
+                try:
+                    logger.debug(f"[translate] Step 5: Trying {fmt} format (attempt {attempt_idx + 1})...")
+                    self.model = AutoModelForSeq2SeqLM.from_pretrained(hf_name, **attempt_kwargs)
+                    self.model = self.model.to(device)
+                    if self._verify_model_integrity(model_name):
+                        load_ok = True
+                        break
+                    else:
+                        logger.warning(f"[translate] Step 5: {fmt} format loaded but integrity check FAILED")
+                        self.model = None
+                except Exception as fmt_e:
+                    logger.warning(f"[translate] Step 5: {fmt} format failed: {fmt_e}")
+                    self.model = None
+
+            if not load_ok:
+                # All formats failed — nuke entire cache and force re-download
+                logger.warning("[translate] Step 5: All formats failed integrity — deleting cache and re-downloading...")
+                self.model = None
+                self._delete_hf_cache(hf_name)
+                # Also delete tokenizer cache to ensure clean slate
+                for attempt_kwargs in load_attempts:
+                    fmt = 'safetensors' if attempt_kwargs.get('use_safetensors') else 'pytorch'
+                    try:
+                        logger.info(f"[translate] Step 5: Force re-download ({fmt})...")
+                        self.model = AutoModelForSeq2SeqLM.from_pretrained(hf_name, force_download=True, **attempt_kwargs)
+                        self.model = self.model.to(device)
+                        if self._verify_model_integrity(model_name):
+                            load_ok = True
+                            break
+                        else:
+                            logger.warning(f"[translate] Step 5: Re-downloaded {fmt} still failed integrity")
+                            self.model = None
+                    except Exception as retry_e:
+                        logger.warning(f"[translate] Step 5: Re-download {fmt} failed: {retry_e}")
+                        self.model = None
+
+            if not load_ok:
+                self.last_error = f"Model {model_name} corrupted — all download attempts failed. Try deleting ~/.cache/huggingface and reinstalling."
+                logger.error(f"[translate] {self.last_error}")
+                self.model = None
+                self.tokenizer = None
+                return False
 
             self.model_name = model_name
             param_count = sum(p.numel() for p in self.model.parameters())
             logger.info(f"[translate] Step 5: Model loaded! {model_name} ({param_count:,} params) on {device}")
             return True
 
-        except (OSError, ValueError, RuntimeError) as e:
-            # Likely corrupted weights — retry with force download
-            logger.warning(f"[translate] Step 5: Model load failed, attempting re-download: {e}")
-            try:
-                self.model = AutoModelForSeq2SeqLM.from_pretrained(hf_name, force_download=True, **kwargs)
-                self.model = self.model.to(device)
-                self.model_name = model_name
-                param_count = sum(p.numel() for p in self.model.parameters())
-                logger.info(f"[translate] Step 5: Model loaded after re-download! {model_name} ({param_count:,} params) on {device}")
-                return True
-            except Exception as retry_e:
-                self.last_error = f"Failed to load model weights (even after re-download): {type(retry_e).__name__}: {retry_e}"
-                logger.error(f"[translate] {self.last_error}")
-                logger.error(f"[translate] Model load traceback:\n{traceback.format_exc()}")
-                self.model = None
-                self.tokenizer = None
-                return False
         except Exception as e:
-            self.last_error = f"Failed to load model weights: {type(e).__name__}: {e}"
+            self.last_error = f"Failed to load model: {type(e).__name__}: {e}"
             logger.error(f"[translate] {self.last_error}")
             logger.error(f"[translate] Model load traceback:\n{traceback.format_exc()}")
             self.model = None
             self.tokenizer = None
             return False
+
+    def _verify_model_integrity(self, model_name: str) -> bool:
+        """Verify loaded model weights are not corrupted (all zeros, missing, or NaN).
+
+        Returns True if model appears healthy, False if corrupted.
+        Detects: empty models, all-zero weights, NaN weights, and models where
+        checkpoint had no actual weight data (all keys MISSING from checkpoint).
+        """
+        if self.model is None:
+            logger.error("[translate] Integrity check: model is None")
+            return False
+
+        import torch
+
+        total_params = 0
+        zero_params = 0
+        nan_params = 0
+        named_count = 0
+
+        for name, param in self.model.named_parameters():
+            named_count += 1
+            numel = param.numel()
+            total_params += numel
+            if torch.all(param == 0).item():
+                zero_params += numel
+            if torch.any(torch.isnan(param)).item():
+                nan_params += numel
+
+        logger.info(f"[translate] Integrity check for {model_name}: "
+                     f"{named_count} layers, {total_params:,} total params, "
+                     f"{zero_params:,} zero params, {nan_params:,} NaN params")
+
+        if total_params == 0:
+            logger.error("[translate] Integrity check FAILED: model has 0 parameters")
+            return False
+
+        # If >90% of parameters are zero, model is likely corrupted
+        zero_ratio = zero_params / total_params if total_params > 0 else 1.0
+        if zero_ratio > 0.9:
+            logger.error(f"[translate] Integrity check FAILED: {zero_ratio:.1%} of params are zero — model likely corrupted")
+            return False
+
+        if nan_params > 0:
+            logger.error(f"[translate] Integrity check FAILED: {nan_params:,} NaN parameters detected")
+            return False
+
+        # Sanity check: NLLB-600M should have at least 100M params
+        if total_params < 100_000_000:
+            logger.error(f"[translate] Integrity check FAILED: only {total_params:,} params — too small for NLLB (expect >100M)")
+            return False
+
+        # Check for "all weights missing from checkpoint" — when from_pretrained
+        # loads architecture but no weights, params are random init. Detect by
+        # checking that the embedding weights have reasonable magnitude.
+        # Trained NLLB embeddings have mean magnitude ~0.01-0.1; random init from
+        # nn.Embedding has much larger variance.
+        try:
+            # Find embedding layer
+            embed = None
+            for name, param in self.model.named_parameters():
+                if 'embed_tokens.weight' in name:
+                    embed = param
+                    break
+            if embed is not None:
+                mean_abs = embed.abs().mean().item()
+                std_val = embed.std().item()
+                logger.info(f"[translate] Integrity: embed mean_abs={mean_abs:.6f}, std={std_val:.6f}")
+                # Trained NLLB embeddings: mean_abs ~0.02-0.08, std ~0.02-0.10
+                # Random init (missing weights): mean_abs ~0.5-1.0, std ~0.5-1.0
+                if mean_abs > 0.3 or std_val > 0.3:
+                    logger.error(f"[translate] Integrity check FAILED: embedding weights look randomly initialized "
+                                 f"(mean_abs={mean_abs:.4f}, std={std_val:.4f}) — checkpoint likely had no data")
+                    return False
+        except Exception as e:
+            logger.warning(f"[translate] Integrity: embedding check skipped: {e}")
+
+        logger.info(f"[translate] Integrity check PASSED for {model_name}")
+        return True
+
+    def _delete_hf_cache(self, hf_name: str):
+        """Delete the HuggingFace cache directory for a model.
+
+        Converts 'facebook/nllb-200-distilled-600M' to the cache path
+        '~/.cache/huggingface/hub/models--facebook--nllb-200-distilled-600M'
+        and removes it entirely so a fresh download can succeed.
+        """
+        import shutil
+        from pathlib import Path
+
+        cache_dir = Path.home() / '.cache' / 'huggingface' / 'hub'
+        # HF cache uses 'models--org--name' format
+        folder_name = 'models--' + hf_name.replace('/', '--')
+        model_cache = cache_dir / folder_name
+
+        if model_cache.exists():
+            try:
+                shutil.rmtree(model_cache)
+                logger.info(f"[translate] Deleted corrupt cache: {model_cache}")
+            except Exception as e:
+                logger.warning(f"[translate] Failed to delete cache {model_cache}: {e}")
+        else:
+            logger.debug(f"[translate] No cache to delete at {model_cache}")
 
     def unload_model(self):
         """Unload the current model."""
