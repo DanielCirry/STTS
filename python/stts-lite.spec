@@ -21,6 +21,9 @@ if DIST_DIR.exists() and (DIST_DIR / 'index.html').exists():
     frontend_datas.append((str(DIST_DIR), 'dist'))
 
 hidden_imports = [
+    # --- Stdlib modules needed by venv packages ---
+    'modulefinder',       # torchvision uses modulefinder
+    'html.parser',        # torchvision.datasets.flickr uses html.parser
     # --- Core async/networking ---
     'asyncio',
     'websockets',

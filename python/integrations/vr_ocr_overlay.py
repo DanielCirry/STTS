@@ -225,6 +225,15 @@ class VROCROverlay:
             import openvr
             overlay = openvr.IVROverlay()
 
+            # --- If disabled, hide everything and return early ---
+            if not self._enabled:
+                for handle in [self._button_handle, self._region_handle,
+                                self._camera_handle, self._translation_handle,
+                                self._close_handle] + self._corner_handles:
+                    if handle:
+                        overlay.hideOverlay(handle)
+                return
+
             # --- Cyan OCR button ---
             if self._button_handle:
                 overlay.setOverlayWidthInMeters(self._button_handle, self._button_pos['width'])
@@ -234,10 +243,7 @@ class VROCROverlay:
                                       self._button_pos['y'],
                                       self._button_pos['x'],
                                       self._button_pos.get('tracking', 'none'))
-                if self._enabled:
-                    overlay.showOverlay(self._button_handle)
-                else:
-                    overlay.hideOverlay(self._button_handle)
+                overlay.showOverlay(self._button_handle)
 
             # --- Capture region ---
             if self._region_handle:
@@ -517,10 +523,11 @@ class VROCROverlay:
             overlay = openvr.IVROverlay()
 
             if enabled:
+                # Show the OCR button when enabled
                 if self._button_handle:
                     overlay.showOverlay(self._button_handle)
             else:
-                # Hide everything
+                # Hide ALL overlays including button when disabled
                 for handle in [self._button_handle, self._region_handle,
                                 self._camera_handle, self._translation_handle,
                                 self._close_handle] + self._corner_handles:

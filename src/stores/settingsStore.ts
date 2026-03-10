@@ -11,6 +11,7 @@ interface AudioSettings {
   speakerCaptureDeviceId: string | null
   ttsOutputDeviceId: string | null
   enableNoiseSuppression: boolean
+  noiseGateThreshold: number
   enableVAD: boolean
   vadSensitivity: number
 }
@@ -103,13 +104,12 @@ interface VROverlaySettings {
   messageLogBgColor: string
   messageLogBgOpacity: number
   messageLogMax: number
+  messageLogAutoHide: number
+  messageLogFadeIn: number
+  messageLogFadeOut: number
 }
 
-export interface RVCSettings {
-  enabled: boolean
-  modelPath: string | null
-  indexPath: string | null
-  modelsDirectory: string
+export interface RVCConversionParams {
   f0UpKey: number          // Pitch shift: -12 to +12 semitones
   indexRate: number         // FAISS influence: 0.0 to 1.0
   filterRadius: number     // Pitch smoothing: 1 to 7
@@ -117,11 +117,59 @@ export interface RVCSettings {
   protect: number          // Consonant protection: 0.0 to 0.5
   resampleSr: number       // Resample rate: 0 = disabled
   volumeEnvelope: number   // Volume envelope mix: 0.0 to 1.0
+  noiseGate: number        // Noise gate threshold: 0.0 to 0.05
+  device: 'cpu' | 'cuda' | 'directml'
+}
+
+export const DEFAULT_RVC_PARAMS: RVCConversionParams = {
+  f0UpKey: 0,
+  indexRate: 0.75,
+  filterRadius: 3,
+  rmsMixRate: 0.25,
+  protect: 0.33,
+  resampleSr: 0,
+  volumeEnvelope: 0.0,
+  noiseGate: 0.0,
+  device: 'cpu' as const,
+}
+
+export interface RVCMicPerformance {
+  blockTime: number          // Block/chunk size in seconds (0.2-2.0)
+  contextTime: number        // Extra inference context in seconds (0.2-3.0)
+  silenceThreshold: number   // Response threshold RMS (0.0-0.05)
+  crossfadeMs: number        // SOLA crossfade in milliseconds (10-200)
+}
+
+export const DEFAULT_RVC_MIC_PERFORMANCE: RVCMicPerformance = {
+  blockTime: 0.5,
+  contextTime: 1.0,
+  silenceThreshold: 0.003,
+  crossfadeMs: 40,
+}
+
+export interface RVCSettings {
+  enabled: boolean
+  modelPath: string | null
+  indexPath: string | null
+  modelsDirectory: string
+  // Legacy flat params (kept for backward compat, migrated to ttsParams/micParams)
+  f0UpKey: number
+  indexRate: number
+  filterRadius: number
+  rmsMixRate: number
+  protect: number
+  resampleSr: number
+  volumeEnvelope: number
   micRvcEnabled: boolean   // Real-time mic conversion
   micRvcOutputDeviceId: number | null
   rvcDevice: 'cpu' | 'cuda' | 'directml'
   rvcAvailableDevices: string[]
   recentModels: Array<{ name: string; path: string; indexPath: string | null; sizeMb: number }>
+  // Independent params per conversion source
+  micParams: RVCConversionParams
+  ttsParams: RVCConversionParams
+  // Mic RVC performance tuning
+  micPerformance: RVCMicPerformance
 }
 
 export interface OCRSettings {
@@ -196,6 +244,9 @@ interface SettingsStore extends Settings {
   updateTTS: (settings: Partial<TTSSettings>) => void
   updateAI: (settings: Partial<AIAssistantSettings>) => void
   updateRVC: (settings: Partial<RVCSettings>) => void
+  updateRVCMicParams: (params: Partial<RVCConversionParams>) => void
+  updateRVCTtsParams: (params: Partial<RVCConversionParams>) => void
+  updateRVCMicPerformance: (params: Partial<RVCMicPerformance>) => void
   updateVROverlay: (settings: Partial<VROverlaySettings>) => void
   updateOCR: (settings: Partial<OCRSettings>) => void
   updateVRChat: (settings: Partial<VRChatSettings>) => void
@@ -211,6 +262,9 @@ interface SettingsStore extends Settings {
   setMenuAlignment: (alignment: 'center' | 'start') => void
   setFirstRunComplete: () => void
   resetToDefaults: () => void
+  restoreFromBackup: (backup: Record<string, unknown>) => void
+  getBackupData: () => Record<string, unknown>
+  needsRestore: () => boolean
 }
 
 const defaultSettings: Settings = {
@@ -219,6 +273,7 @@ const defaultSettings: Settings = {
     speakerCaptureDeviceId: null,
     ttsOutputDeviceId: null,
     enableNoiseSuppression: true,
+    noiseGateThreshold: 0.005,
     enableVAD: true,
     vadSensitivity: 0.5,
   },
@@ -288,6 +343,9 @@ const defaultSettings: Settings = {
     rvcDevice: 'cpu' as const,
     rvcAvailableDevices: ['cpu'],
     recentModels: [],
+    micParams: { ...DEFAULT_RVC_PARAMS },
+    ttsParams: { ...DEFAULT_RVC_PARAMS },
+    micPerformance: { ...DEFAULT_RVC_MIC_PERFORMANCE },
   },
   ocr: {
     enabled: false,
@@ -337,6 +395,9 @@ const defaultSettings: Settings = {
     messageLogBgColor: '#000000',
     messageLogBgOpacity: 0.6,
     messageLogMax: 20,
+    messageLogAutoHide: 0,
+    messageLogFadeIn: 0.3,
+    messageLogFadeOut: 0.5,
   },
   vrchat: {
     oscEnabled: true,
@@ -381,6 +442,12 @@ export const useSettingsStore = create<SettingsStore>()(
         set((state) => ({ ai: { ...state.ai, ...settings } })),
       updateRVC: (settings) =>
         set((state) => ({ rvc: { ...state.rvc, ...settings } })),
+      updateRVCMicParams: (params) =>
+        set((state) => ({ rvc: { ...state.rvc, micParams: { ...state.rvc.micParams, ...params } } })),
+      updateRVCTtsParams: (params) =>
+        set((state) => ({ rvc: { ...state.rvc, ttsParams: { ...state.rvc.ttsParams, ...params } } })),
+      updateRVCMicPerformance: (params) =>
+        set((state) => ({ rvc: { ...state.rvc, micPerformance: { ...state.rvc.micPerformance, ...params } } })),
       updateVROverlay: (settings) =>
         set((state) => ({ vrOverlay: { ...state.vrOverlay, ...settings } })),
       updateOCR: (settings) =>
@@ -503,6 +570,149 @@ export const useSettingsStore = create<SettingsStore>()(
       setMenuAlignment: (alignment) => set({ menuAlignment: alignment }),
       setFirstRunComplete: () => set({ firstRunComplete: true }),
       resetToDefaults: () => set(defaultSettings),
+      // Check if current settings look like fresh defaults (no devices configured)
+      needsRestore: () => {
+        const state = useSettingsStore.getState()
+        const hasNoDevices = (
+          state.audio.microphoneDeviceId === null &&
+          state.audio.speakerCaptureDeviceId === null &&
+          state.audio.ttsOutputDeviceId === null &&
+          state.outputProfiles.every(p => p.audioOutputDeviceId === null)
+        )
+        const isDefault = !state.firstRunComplete || hasNoDevices
+        console.log('[settingsStore] needsRestore check:', { hasNoDevices, firstRunComplete: state.firstRunComplete, result: isDefault })
+        return isDefault
+      },
+      // Get device-related settings for backup (only what needs to survive reinstall)
+      getBackupData: () => {
+        const state = useSettingsStore.getState()
+        const backup = {
+          audio: {
+            microphoneDeviceId: state.audio.microphoneDeviceId,
+            speakerCaptureDeviceId: state.audio.speakerCaptureDeviceId,
+            ttsOutputDeviceId: state.audio.ttsOutputDeviceId,
+            enableNoiseSuppression: state.audio.enableNoiseSuppression,
+            noiseGateThreshold: state.audio.noiseGateThreshold,
+            enableVAD: state.audio.enableVAD,
+            vadSensitivity: state.audio.vadSensitivity,
+          },
+          outputProfiles: state.outputProfiles,
+          stt: { model: state.stt.model, language: state.stt.language },
+          translation: {
+            provider: state.translation.provider,
+            languagePairs: state.translation.languagePairs,
+            activePairIndex: state.translation.activePairIndex,
+          },
+          tts: {
+            engine: state.tts.engine,
+            voice: state.tts.voice,
+            speed: state.tts.speed,
+            volume: state.tts.volume,
+            voicevoxUrl: state.tts.voicevoxUrl,
+            voicevoxEnglishPhonetic: state.tts.voicevoxEnglishPhonetic,
+            voicePerEngine: state.tts.voicePerEngine,
+          },
+          ai: {
+            provider: state.ai.provider,
+            localModel: state.ai.localModel,
+            modelsDirectory: state.ai.modelsDirectory,
+            keyword: state.ai.keyword,
+          },
+          rvc: {
+            micRvcOutputDeviceId: state.rvc.micRvcOutputDeviceId,
+            modelsDirectory: state.rvc.modelsDirectory,
+            recentModels: state.rvc.recentModels,
+          },
+          menuPosition: state.menuPosition,
+          menuAlignment: state.menuAlignment,
+          firstRunComplete: state.firstRunComplete,
+        }
+        console.log('[settingsStore] getBackupData:', JSON.stringify(backup).substring(0, 200) + '...')
+        return backup
+      },
+      // Restore device settings from a backup
+      restoreFromBackup: (backup) =>
+        set((state) => {
+          console.log('[settingsStore] restoreFromBackup: applying backup, keys=', Object.keys(backup))
+          const b = backup as Record<string, any>
+          const result: Partial<Settings> = {}
+
+          // Restore audio devices
+          if (b.audio) {
+            result.audio = { ...state.audio }
+            if (b.audio.microphoneDeviceId !== undefined) result.audio.microphoneDeviceId = b.audio.microphoneDeviceId
+            if (b.audio.speakerCaptureDeviceId !== undefined) result.audio.speakerCaptureDeviceId = b.audio.speakerCaptureDeviceId
+            if (b.audio.ttsOutputDeviceId !== undefined) result.audio.ttsOutputDeviceId = b.audio.ttsOutputDeviceId
+            if (b.audio.enableNoiseSuppression !== undefined) result.audio.enableNoiseSuppression = b.audio.enableNoiseSuppression
+            if (b.audio.noiseGateThreshold !== undefined) result.audio.noiseGateThreshold = b.audio.noiseGateThreshold
+            if (b.audio.enableVAD !== undefined) result.audio.enableVAD = b.audio.enableVAD
+            if (b.audio.vadSensitivity !== undefined) result.audio.vadSensitivity = b.audio.vadSensitivity
+            console.log('[settingsStore] restoreFromBackup: audio devices restored:', result.audio.microphoneDeviceId, result.audio.speakerCaptureDeviceId, result.audio.ttsOutputDeviceId)
+          }
+
+          // Restore output profiles
+          if (b.outputProfiles && Array.isArray(b.outputProfiles) && b.outputProfiles.length > 0) {
+            result.outputProfiles = b.outputProfiles
+            console.log('[settingsStore] restoreFromBackup: output profiles restored:', b.outputProfiles.length, 'profiles')
+          }
+
+          // Restore STT settings
+          if (b.stt) {
+            result.stt = { ...state.stt }
+            if (b.stt.model) result.stt.model = b.stt.model
+            if (b.stt.language) result.stt.language = b.stt.language
+            console.log('[settingsStore] restoreFromBackup: STT restored:', result.stt.model, result.stt.language)
+          }
+
+          // Restore translation settings
+          if (b.translation) {
+            result.translation = { ...state.translation }
+            if (b.translation.provider) result.translation.provider = b.translation.provider
+            if (b.translation.languagePairs) result.translation.languagePairs = b.translation.languagePairs
+            if (b.translation.activePairIndex !== undefined) result.translation.activePairIndex = b.translation.activePairIndex
+            console.log('[settingsStore] restoreFromBackup: translation restored:', result.translation.provider, result.translation.languagePairs?.length, 'pairs')
+          }
+
+          // Restore TTS settings
+          if (b.tts) {
+            result.tts = { ...state.tts }
+            if (b.tts.engine) result.tts.engine = b.tts.engine
+            if (b.tts.voice) result.tts.voice = b.tts.voice
+            if (b.tts.speed !== undefined) result.tts.speed = b.tts.speed
+            if (b.tts.volume !== undefined) result.tts.volume = b.tts.volume
+            if (b.tts.voicevoxUrl) result.tts.voicevoxUrl = b.tts.voicevoxUrl
+            if (b.tts.voicevoxEnglishPhonetic !== undefined) result.tts.voicevoxEnglishPhonetic = b.tts.voicevoxEnglishPhonetic
+            if (b.tts.voicePerEngine) result.tts.voicePerEngine = b.tts.voicePerEngine
+            console.log('[settingsStore] restoreFromBackup: TTS restored:', result.tts.engine, result.tts.voice)
+          }
+
+          // Restore AI settings
+          if (b.ai) {
+            result.ai = { ...state.ai }
+            if (b.ai.provider) result.ai.provider = b.ai.provider
+            if (b.ai.localModel) result.ai.localModel = b.ai.localModel
+            if (b.ai.modelsDirectory) result.ai.modelsDirectory = b.ai.modelsDirectory
+            if (b.ai.keyword) result.ai.keyword = b.ai.keyword
+            console.log('[settingsStore] restoreFromBackup: AI restored:', result.ai.provider, result.ai.modelsDirectory)
+          }
+
+          // Restore RVC settings
+          if (b.rvc) {
+            result.rvc = { ...state.rvc }
+            if (b.rvc.micRvcOutputDeviceId !== undefined) result.rvc.micRvcOutputDeviceId = b.rvc.micRvcOutputDeviceId
+            if (b.rvc.modelsDirectory) result.rvc.modelsDirectory = b.rvc.modelsDirectory
+            if (b.rvc.recentModels) result.rvc.recentModels = b.rvc.recentModels
+            console.log('[settingsStore] restoreFromBackup: RVC restored')
+          }
+
+          // Restore UI preferences
+          if (b.menuPosition) result.menuPosition = b.menuPosition
+          if (b.menuAlignment) result.menuAlignment = b.menuAlignment
+          if (b.firstRunComplete) result.firstRunComplete = b.firstRunComplete
+
+          console.log('[settingsStore] restoreFromBackup: complete, restored keys=', Object.keys(result))
+          return result
+        }),
     }),
     {
       name: 'stts-settings',
@@ -671,9 +881,56 @@ export const useSettingsStore = create<SettingsStore>()(
           }
         }
 
+        // v10 -> v11: Add noiseGateThreshold to audio settings
+        if (version < 11) {
+          const audio = (state?.audio as Record<string, unknown>) || {}
+          if (audio.noiseGateThreshold === undefined) {
+            audio.noiseGateThreshold = 0.005
+          }
+        }
+
+        // v11 -> v12: Add message log auto-hide/fade + independent RVC params
+        if (version < 12) {
+          const vr = (state?.vrOverlay as Record<string, unknown>) || {}
+          if (vr.messageLogAutoHide === undefined) vr.messageLogAutoHide = 0
+          if (vr.messageLogFadeIn === undefined) vr.messageLogFadeIn = 0.3
+          if (vr.messageLogFadeOut === undefined) vr.messageLogFadeOut = 0.5
+        }
+
+        // v11 -> v12 (cont): Add independent RVC params per conversion source (mic vs tts)
+        if (version < 12) {
+          const rvc = (state?.rvc as Record<string, unknown>) || {}
+          if (!rvc.micParams) {
+            rvc.micParams = {
+              f0UpKey: (rvc.f0UpKey as number) ?? 0,
+              indexRate: (rvc.indexRate as number) ?? 0.75,
+              filterRadius: (rvc.filterRadius as number) ?? 3,
+              rmsMixRate: (rvc.rmsMixRate as number) ?? 0.25,
+              protect: (rvc.protect as number) ?? 0.33,
+              resampleSr: (rvc.resampleSr as number) ?? 0,
+              volumeEnvelope: (rvc.volumeEnvelope as number) ?? 0.0,
+              noiseGate: 0.0,
+              device: (rvc.rvcDevice as string) ?? 'cpu',
+            }
+          }
+          if (!rvc.ttsParams) {
+            rvc.ttsParams = {
+              f0UpKey: (rvc.f0UpKey as number) ?? 0,
+              indexRate: (rvc.indexRate as number) ?? 0.75,
+              filterRadius: (rvc.filterRadius as number) ?? 3,
+              rmsMixRate: (rvc.rmsMixRate as number) ?? 0.25,
+              protect: (rvc.protect as number) ?? 0.33,
+              resampleSr: (rvc.resampleSr as number) ?? 0,
+              volumeEnvelope: (rvc.volumeEnvelope as number) ?? 0.0,
+              noiseGate: 0.0,
+              device: (rvc.rvcDevice as string) ?? 'cpu',
+            }
+          }
+        }
+
         return state
       },
-      version: 10,
+      version: 12,
     }
   )
 )

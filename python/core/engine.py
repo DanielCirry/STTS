@@ -1077,9 +1077,7 @@ class STTSEngine:
                 logger.warning(f"TTS failed: {e}")
 
         # --- Step 4: Send to OSC profiles / VR overlay ---
-        await self._route_text_to_osc(text, 'original')
-        if translated:
-            await self._route_text_to_osc(translated, 'translated')
+        await self._route_combined_to_osc(text, translated)
 
         if self._vr_overlay and self._vr_overlay.is_initialized:
             self._send_to_overlay(text, translated, 'user')
@@ -1168,9 +1166,7 @@ class STTSEngine:
                 logger.warning(f"TTS failed: {e}")
 
         # --- Step 4: OSC profiles / overlay ---
-        await self._route_text_to_osc(text, 'original')
-        if translated:
-            await self._route_text_to_osc(translated, 'translated')
+        await self._route_combined_to_osc(text, translated)
 
         if self._vr_overlay and self._vr_overlay.is_initialized:
             self._send_to_overlay(text, translated, 'user')
@@ -1508,11 +1504,28 @@ class STTSEngine:
                 self._audio_manager.vad_enabled = audio_settings['vad_enabled']
             if 'vad_sensitivity' in audio_settings:
                 self._audio_manager.vad_sensitivity = audio_settings['vad_sensitivity']
+            if 'noise_gate_threshold' in audio_settings:
+                threshold = float(audio_settings['noise_gate_threshold'])
+                self._audio_manager.noise_gate_threshold = threshold
+                logger.info(f"[audio] Noise gate threshold set to {threshold}")
             if 'enableNoiseSuppression' in audio_settings:
-                # Enable/disable noise gate (0.005 threshold when on, 0 when off)
+                # Enable/disable noise gate — use stored threshold or default 0.005
                 enabled = audio_settings['enableNoiseSuppression']
-                self._audio_manager.noise_gate_threshold = 0.005 if enabled else 0.0
-                logger.info(f"[audio] Noise gate {'enabled (0.005)' if enabled else 'disabled'}")
+                if not enabled:
+                    self._audio_manager.noise_gate_threshold = 0.0
+                    logger.info("[audio] Noise gate disabled")
+                else:
+                    # If no explicit threshold provided, use current or default
+                    if self._audio_manager.noise_gate_threshold == 0.0:
+                        self._audio_manager.noise_gate_threshold = 0.005
+                    logger.info(f"[audio] Noise gate enabled (threshold={self._audio_manager.noise_gate_threshold})")
+
+            # Restart mic RVC if input device changed while it's running
+            if 'input_device' in audio_settings and self._mic_rvc and self._mic_rvc.is_running:
+                new_input = audio_settings['input_device']
+                logger.info(f"[audio] Input device changed to {new_input}, restarting mic RVC")
+                self._mic_rvc.stop()
+                self._mic_rvc.start(self._mic_rvc._output_device_id, input_device_id=new_input)
 
         # Apply TTS settings
         if self._tts and 'tts' in settings:
@@ -1705,10 +1718,15 @@ class STTSEngine:
                 # Handle enable/disable
                 if 'enabled' in overlay_settings:
                     if overlay_settings['enabled'] and not self._vr_overlay.is_initialized:
-                        # Initialize overlay if not already
-                        if self._vr_overlay.is_available:
-                            self._vr_overlay.initialize()
+                        # Try to initialize — let initialize() handle availability checks
+                        # (SteamVR may have started after engine init)
+                        logger.info("[vrOverlay] User enabled VR overlay, attempting initialization...")
+                        if not self._vr_overlay.initialize():
+                            logger.warning("[vrOverlay] VR overlay initialization failed — SteamVR may not be running or no HMD detected")
                     elif not overlay_settings['enabled'] and self._vr_overlay.is_initialized:
+                        # Hide OCR overlays when VR overlay is disabled
+                        if self._vr_ocr_overlay and self._vr_ocr_overlay.is_initialized:
+                            self._vr_ocr_overlay.set_enabled(False)
                         self._vr_overlay.shutdown()
 
                 # Update other settings if initialized
@@ -1769,10 +1787,11 @@ class STTSEngine:
                             self.ocr_stop_auto()
 
             # Forward OCR settings to VR OCR overlay
+            # set_enabled BEFORE update_settings so _configure_overlays sees correct state
             if self._vr_ocr_overlay and self._vr_ocr_overlay.is_initialized:
-                self._vr_ocr_overlay.update_settings(ocr_settings)
                 if 'enabled' in ocr_settings:
                     self._vr_ocr_overlay.set_enabled(ocr_settings['enabled'])
+                self._vr_ocr_overlay.update_settings(ocr_settings)
 
         # Apply RVC settings
         if 'rvc' in settings:
@@ -2098,7 +2117,7 @@ class STTSEngine:
                 if self._translator is None:
                     self._translator = Translator()
 
-                device = self.settings.get('stt', {}).get('device', 'auto')  # Share device setting
+                device = self.settings.get('translation', {}).get('device', 'auto')
 
                 # Wrap with download progress tracking
                 try:
@@ -2356,6 +2375,29 @@ class STTSEngine:
         self._tts.set_output_device(primary_device)
         self._tts.set_extra_output_devices(extra_devices)
 
+    async def _route_combined_to_osc(self, original: str, translated: Optional[str]):
+        """Route text to OSC, combining translation + original into one message when both enabled."""
+        profiles = self._get_output_profiles()
+        for profile in profiles:
+            pid = profile.get('id', 'default')
+            if not profile.get('osc_enabled', False):
+                continue
+            client = self._osc_clients.get(pid)
+            if not client or not client.is_connected:
+                continue
+
+            send_original = profile.get('send_original_text', False)
+            send_translated = profile.get('send_translated_text', False)
+
+            if translated and send_translated and send_original:
+                # Both on: "translation\noriginal" in one message
+                combined = f"{translated}\n{original}"
+                await client.send_text(combined)
+            elif translated and send_translated:
+                await client.send_text(translated)
+            elif send_original:
+                await client.send_text(original)
+
     async def _route_text_to_osc(self, text: str, text_type: str):
         """Route text to OSC clients based on profile settings.
 
@@ -2471,6 +2513,42 @@ class STTSEngine:
             return False
         except Exception as e:
             logger.error(f"[llm] Failed to unload LLM: {e}")
+            return False
+
+    def unload_stt(self) -> bool:
+        """Unload the current STT (Whisper) model to free memory."""
+        if not self._stt:
+            logger.warning("[stt] No STT instance to unload")
+            return False
+        try:
+            if self._stt.is_loaded:
+                model_name = self._stt.model_name or 'unknown'
+                self._stt.unload_model()
+                logger.info(f"[stt] STT model '{model_name}' unloaded successfully")
+                return True
+            else:
+                logger.info("[stt] No STT model currently loaded")
+                return True
+        except Exception as e:
+            logger.error(f"[stt] Failed to unload STT model: {e}")
+            return False
+
+    def unload_translation(self) -> bool:
+        """Unload the current translation (NLLB) model to free memory."""
+        if not self._translator:
+            logger.warning("[translation] No translator instance to unload")
+            return False
+        try:
+            if self._translator.is_loaded:
+                model_name = self._translator.current_model or 'unknown'
+                self._translator.unload_model()
+                logger.info(f"[translation] Translation model '{model_name}' unloaded successfully")
+                return True
+            else:
+                logger.info("[translation] No translation model currently loaded")
+                return True
+        except Exception as e:
+            logger.error(f"[translation] Failed to unload translation model: {e}")
             return False
 
     def get_local_models_directory(self) -> str:
@@ -2914,8 +2992,12 @@ class STTSEngine:
 
     async def mic_rvc_stop(self):
         """Stop real-time mic voice conversion."""
+        logger.info("[mic_rvc_stop] Called, _mic_rvc=%s, is_running=%s",
+                     self._mic_rvc is not None,
+                     self._mic_rvc.is_running if self._mic_rvc else 'N/A')
         if self._mic_rvc:
             self._mic_rvc.stop()
+            logger.info("[mic_rvc_stop] stop() returned, is_running=%s", self._mic_rvc.is_running)
 
         if self._audio_manager:
             self._audio_manager.on_mic_rvc_data = None
@@ -2924,12 +3006,31 @@ class STTSEngine:
             if not self.listening and self._audio_manager.is_recording:
                 self._audio_manager.stop_microphone()
 
+        logger.info("[mic_rvc_stop] Broadcasting rvc_mic_stopped")
         await self.broadcast(create_event(EventType.RVC_MIC_STOPPED, {}))
 
     async def mic_rvc_set_output_device(self, device_id: Optional[int]):
         """Change the output device for mic RVC."""
         if self._mic_rvc:
             self._mic_rvc.set_output_device(device_id)
+
+    async def mic_rvc_set_performance(self, params: dict):
+        """Update mic RVC performance parameters."""
+        if not self._mic_rvc:
+            return
+        if 'block_time' in params:
+            self._mic_rvc.set_buffer_duration(float(params['block_time']))
+        if 'context_time' in params:
+            self._mic_rvc.set_context_time(float(params['context_time']))
+        if 'silence_threshold' in params:
+            self._mic_rvc.set_silence_threshold(float(params['silence_threshold']))
+        if 'crossfade_ms' in params:
+            self._mic_rvc.set_crossfade_ms(float(params['crossfade_ms']))
+        logger.info(f"[rvc] Mic RVC performance updated: {params}")
+        # Broadcast updated perf params
+        await self.broadcast(create_event(EventType.RVC_STATUS, {
+            'mic_performance': self._mic_rvc.get_performance_params()
+        }))
 
     async def rvc_set_device(self, device_str: str):
         """Switch RVC compute device (CPU/GPU).
@@ -2938,7 +3039,11 @@ class STTSEngine:
         The frontend sends 'cuda' for any GPU; we translate to DirectML
         when that's what's actually installed (AMD/Intel GPUs).
         """
-        import torch
+        try:
+            import torch
+        except ImportError:
+            logger.debug("[rvc_set_device] torch not installed, ignoring device change")
+            return
 
         # Auto-detect: if 'cuda' requested but unavailable, try DirectML
         if device_str == 'cuda' and not torch.cuda.is_available():
@@ -2970,7 +3075,8 @@ class STTSEngine:
             await self.broadcast(create_event(EventType.RVC_STATUS, rvc.get_status()))
             # Restart mic if it was running (still on old device)
             if was_running:
-                self._mic_rvc.start(self._mic_rvc._output_device_id)
+                input_device_id = self.settings.get('audio', {}).get('input_device')
+                self._mic_rvc.start(self._mic_rvc._output_device_id, input_device_id=input_device_id)
             return
 
         # Adjust block duration based on device
@@ -2981,7 +3087,8 @@ class STTSEngine:
                 self._mic_rvc.set_buffer_duration(0.25)  # 0.25s blocks on GPU
 
         if was_running:
-            self._mic_rvc.start(self._mic_rvc._output_device_id)
+            input_device_id = self.settings.get('audio', {}).get('input_device')
+            self._mic_rvc.start(self._mic_rvc._output_device_id, input_device_id=input_device_id)
 
         await self.broadcast(create_event(EventType.RVC_STATUS, rvc.get_status()))
 
@@ -3052,6 +3159,18 @@ class STTSEngine:
             voicevox = self._tts._engines.get('voicevox')
             if voicevox:
                 voicevox.engine_url = f'http://127.0.0.1:{50021}'
+            await self.broadcast(create_event(EventType.VOICEVOX_ENGINE_STATUS, {
+                'running': True,
+                'port': 50021,
+                'pid': mgr._process.pid if mgr._process else None,
+                'error': None,
+            }))
+        else:
+            logger.error("VOICEVOX engine failed to start")
+            await self.broadcast(create_event(EventType.VOICEVOX_ENGINE_STATUS, {
+                'running': False,
+                'error': 'Engine failed to start',
+            }))
         return success
 
     def voicevox_stop_engine(self):
@@ -3080,8 +3199,18 @@ class STTSEngine:
                     'pid': mgr._process.pid if mgr._process else None,
                     'error': None,
                 }))
+            else:
+                logger.error(f"VOICEVOX engine failed to start (success={success})")
+                await self.broadcast(create_event(EventType.VOICEVOX_ENGINE_STATUS, {
+                    'running': False,
+                    'error': 'Engine failed to start — check if run.exe exists and port 50021 is free',
+                }))
         except Exception as e:
             logger.error(f"Failed to auto-start VOICEVOX: {e}")
+            await self.broadcast(create_event(EventType.VOICEVOX_ENGINE_STATUS, {
+                'running': False,
+                'error': str(e),
+            }))
 
     # ── OCR Methods ──────────────────────────────────────────────────────
 
@@ -3173,19 +3302,19 @@ class STTSEngine:
             except Exception as e:
                 logger.warning(f"[ocr] Local translation failed: {e}")
 
-        # Try free provider
+        # Try free provider (sync method — no await)
         if self._free_translator:
             try:
-                result = await self._free_translator.translate(text, source, target)
+                result = self._free_translator.translate(text, source, target)
                 if result:
                     return result
             except Exception as e:
                 logger.warning(f"[ocr] Free translation failed: {e}")
 
-        # Try cloud provider
+        # Try cloud provider (sync method — no await)
         if self._cloud_translator:
             try:
-                result = await self._cloud_translator.translate(text, source, target)
+                result = self._cloud_translator.translate(text, source, target)
                 if result:
                     return result
             except Exception as e:
@@ -3209,6 +3338,59 @@ class STTSEngine:
 
         logger.info(f"[ocr] Initializing OCR: languages={langs}, device={dev}")
         return await self._ocr_engine.initialize(langs, dev)
+
+    # EasyOCR script groups — languages within a group can be combined, but
+    # mixing groups (e.g. Latin + Cyrillic) causes errors or degraded results.
+    # 'en' is special and can always be added alongside any group.
+    _EASYOCR_CYRILLIC = {'ru', 'uk', 'be', 'bg', 'rs_cyrillic', 'mn'}
+    _EASYOCR_LATIN = {
+        'en', 'fr', 'de', 'es', 'it', 'pt', 'nl', 'pl', 'tr', 'vi', 'id',
+        'cs', 'sv', 'da', 'fi', 'no', 'hu', 'ro', 'hr', 'sk', 'sl', 'et',
+        'lv', 'lt',
+    }
+    _EASYOCR_CJK = {'ja', 'ko', 'ch_sim', 'ch_tra'}
+    _EASYOCR_ARABIC = {'ar'}
+    _EASYOCR_DEVANAGARI = {'hi', 'mr', 'ne'}
+    _EASYOCR_THAI = {'th'}
+
+    def _validate_easyocr_languages(self, langs: list) -> list:
+        """Validate EasyOCR language list for script compatibility.
+
+        EasyOCR can't mix incompatible scripts (e.g. Latin + Cyrillic).
+        Returns a filtered list keeping the dominant script group.
+        'en' is always safe to include.
+        """
+        if len(langs) <= 1:
+            return langs
+
+        # Classify each language into its script group
+        cyrillic = [l for l in langs if l in self._EASYOCR_CYRILLIC]
+        latin = [l for l in langs if l in self._EASYOCR_LATIN and l != 'en']
+        cjk = [l for l in langs if l in self._EASYOCR_CJK]
+        arabic = [l for l in langs if l in self._EASYOCR_ARABIC]
+        devanagari = [l for l in langs if l in self._EASYOCR_DEVANAGARI]
+        thai = [l for l in langs if l in self._EASYOCR_THAI]
+        has_en = 'en' in langs
+
+        # Count non-empty groups (excluding 'en' which is universal)
+        groups = [g for g in [cyrillic, latin, cjk, arabic, devanagari, thai] if g]
+
+        if len(groups) <= 1:
+            # Only one script group (plus maybe 'en') — all compatible
+            return langs
+
+        # Multiple script groups detected — pick the largest group
+        # Priority: the active pair's target language group
+        groups.sort(key=len, reverse=True)
+        best_group = groups[0]
+        filtered = list(best_group)
+        if has_en:
+            filtered.append('en')
+
+        dropped = set(langs) - set(filtered)
+        logger.warning(f"[ocr] Script conflict: dropping {dropped} (keeping {filtered}). "
+                       f"EasyOCR can't mix Latin/Cyrillic/CJK scripts.")
+        return filtered
 
     def _get_ocr_languages_from_pairs(self) -> list:
         """Extract OCR languages from all translation pair targets + active source."""
@@ -3237,6 +3419,9 @@ class STTSEngine:
             easyocr_code = NLLB_TO_EASYOCR.get(code)
             if easyocr_code and easyocr_code not in ocr_langs:
                 ocr_langs.append(easyocr_code)
+
+        # Validate script compatibility (e.g. can't mix Latin + Cyrillic)
+        ocr_langs = self._validate_easyocr_languages(ocr_langs)
 
         logger.info(f"[ocr] Derived OCR languages from translation pairs: {ocr_langs}")
         return ocr_langs if ocr_langs else ['en']

@@ -20,13 +20,52 @@ from core.engine import STTSEngine
 from core.events import EventType, create_event
 
 
+def _migrate_roaming_to_local():
+    """Move STTS data from %APPDATA% (Roaming) to %LOCALAPPDATA% (Local).
+
+    Older versions stored logs, cache, and settings-backup in Roaming.
+    Everything should be in Local (next to the exe install).
+    """
+    import shutil
+    roaming = os.environ.get('APPDATA')
+    local = os.environ.get('LOCALAPPDATA')
+    if not roaming or not local or roaming == local:
+        return
+
+    old_stts = Path(roaming) / 'STTS'
+    new_stts = Path(local) / 'STTS'
+    if not old_stts.exists():
+        return
+
+    new_stts.mkdir(parents=True, exist_ok=True)
+
+    # Move individual items (skip voicevox-engine — handled by VoicevoxEngineManager)
+    for item_name in ['logs', 'cache', 'models', 'settings-backup.json']:
+        old_item = old_stts / item_name
+        new_item = new_stts / item_name
+        if old_item.exists() and not new_item.exists():
+            try:
+                shutil.move(str(old_item), str(new_item))
+            except Exception:
+                pass  # Not critical — will be recreated
+
+    # Clean up old Roaming\STTS if empty
+    try:
+        if old_stts.exists() and not any(old_stts.iterdir()):
+            old_stts.rmdir()
+    except Exception:
+        pass
+
+
 def setup_logging():
     """Configure logging: file (INFO) + console (WARNING).
 
-    File logs go to %APPDATA%/STTS/logs/stts.log with rotation (5 MB, 2 backups).
+    File logs go to %LOCALAPPDATA%/STTS/logs/stts.log with rotation (5 MB, 2 backups).
     Console (stderr) only shows WARNING and above to reduce noise.
     """
-    appdata = os.environ.get('APPDATA') or str(Path.home())
+    _migrate_roaming_to_local()
+
+    appdata = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or str(Path.home())
     log_dir = Path(appdata) / 'STTS' / 'logs'
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / 'stts.log'
@@ -280,7 +319,14 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
 
         elif msg_type == 'fetch_voicevox_voices':
             logger.debug("[ws] fetch_voicevox_voices")
-            if engine and engine._tts:
+            # Check if VOICEVOX engine is actually running before trying to fetch
+            engine_running = False
+            if engine and engine._voicevox_manager:
+                engine_running = engine._voicevox_manager.is_engine_running()
+            if not engine_running:
+                logger.debug("[ws] fetch_voicevox_voices: engine not running, returning empty + status")
+                await websocket.send(json.dumps({'type': 'voicevox_voices', 'payload': {'voices': [], 'engine_running': False}}))
+            elif engine and engine._tts:
                 voicevox = engine._tts._engines.get('voicevox')
                 if voicevox:
                     try:
@@ -288,9 +334,9 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
                     except Exception as e:
                         logger.warning(f"Failed to fetch VOICEVOX voices: {e}")
                         voice_dicts = []
-                    await websocket.send(json.dumps({'type': 'voicevox_voices', 'payload': {'voices': voice_dicts}}))
+                    await websocket.send(json.dumps({'type': 'voicevox_voices', 'payload': {'voices': voice_dicts, 'engine_running': True}}))
                 else:
-                    await websocket.send(json.dumps({'type': 'voicevox_voices', 'payload': {'voices': []}}))
+                    await websocket.send(json.dumps({'type': 'voicevox_voices', 'payload': {'voices': [], 'engine_running': True}}))
 
         elif msg_type == 'voicevox_check_install':
             logger.debug("[ws] voicevox_check_install")
@@ -318,7 +364,11 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
                 })))
 
                 async def _do_start_engine():
-                    success = await engine.voicevox_start_engine()
+                    try:
+                        success = await engine.voicevox_start_engine()
+                    except Exception as e:
+                        logger.error(f"[ws] voicevox_start_engine exception: {e}")
+                        success = False
                     await engine.broadcast(create_event(EventType.VOICEVOX_SETUP_PROGRESS, {
                         'stage': 'complete' if success else 'error',
                         'progress': 100 if success else 0,
@@ -454,6 +504,18 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
             if engine:
                 success = engine.unload_llm()
                 await websocket.send(json.dumps({'type': 'llm_unloaded', 'payload': {'success': success}}))
+
+        elif msg_type == 'unload_stt':
+            logger.info("[ws] unload_stt")
+            if engine:
+                success = engine.unload_stt()
+                await websocket.send(json.dumps({'type': 'stt_unloaded', 'payload': {'success': success}}))
+
+        elif msg_type == 'unload_translation':
+            logger.info("[ws] unload_translation")
+            if engine:
+                success = engine.unload_translation()
+                await websocket.send(json.dumps({'type': 'translation_unloaded', 'payload': {'success': success}}))
 
         elif msg_type == 'browse_llm_folder':
             logger.debug("[ws] browse_llm_folder")
@@ -811,6 +873,11 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
                 device = payload.get('device', 'cpu')
                 await engine.rvc_set_device(device)
 
+        elif msg_type == 'rvc_mic_set_performance':
+            logger.debug(f"[ws] rvc_mic_set_performance: {payload}")
+            if engine:
+                await engine.mic_rvc_set_performance(payload)
+
         elif msg_type == 'get_features_status':
             logger.debug("[ws] get_features_status")
             try:
@@ -888,17 +955,24 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
 
         elif msg_type == 'restart_app':
             logger.info("[ws] restart_app requested by frontend")
-            await broadcast({'type': 'app_restarting', 'payload': {'reason': 'Restarting for GPU support'}})
+            await broadcast({'type': 'app_restarting', 'payload': {'reason': 'Restarting to apply changes'}})
             await asyncio.sleep(1)
             # Launch new process, then kill ourselves
-            import subprocess
+            import subprocess as _sp
             args = [sys.executable] + sys.argv[1:] + ['--no-browser']
             # Deduplicate --no-browser
             if args.count('--no-browser') > 1:
                 args = [a for a in args if a != '--no-browser'] + ['--no-browser']
-            subprocess.Popen(args,
-                             creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0)
-            logger.info("[ws] New process spawned, exiting current process")
+            logger.info(f"[ws] Spawning new process: {args}")
+            logger.info(f"[ws] sys.executable={sys.executable}, sys.argv={sys.argv}")
+            try:
+                proc = _sp.Popen(args,
+                                 creationflags=_sp.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0)
+                logger.info(f"[ws] New process spawned (pid={proc.pid}), exiting current process")
+            except Exception as restart_err:
+                logger.error(f"[ws] Failed to spawn restart process: {restart_err}")
+                await websocket.send(json.dumps({'type': 'error', 'payload': {'message': f'Restart failed: {restart_err}'}}))
+                return  # Don't exit if restart failed
             os._exit(0)
 
         elif msg_type == 'rvc_get_available_devices':
@@ -909,6 +983,38 @@ async def handle_message(websocket: WebSocketServerProtocol, message: str):
                 'type': 'rvc_available_devices',
                 'payload': {'devices': devices}
             }))
+
+        elif msg_type == 'save_settings_backup':
+            logger.info(f"[ws] save_settings_backup: keys={list(payload.keys()) if payload else 'none'}")
+            try:
+                appdata = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or str(Path.home())
+                backup_dir = Path(appdata) / 'STTS'
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_file = backup_dir / 'settings-backup.json'
+                with open(backup_file, 'w', encoding='utf-8') as f:
+                    json.dump(payload, f, indent=2)
+                logger.info(f"[ws] Settings backup saved to {backup_file}")
+                await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_SAVED, {'success': True})))
+            except Exception as e:
+                logger.error(f"[ws] Failed to save settings backup: {e}")
+                await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_SAVED, {'success': False, 'error': str(e)})))
+
+        elif msg_type == 'load_settings_backup':
+            logger.info("[ws] load_settings_backup")
+            try:
+                appdata = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or str(Path.home())
+                backup_file = Path(appdata) / 'STTS' / 'settings-backup.json'
+                if backup_file.exists():
+                    with open(backup_file, 'r', encoding='utf-8') as f:
+                        backup_data = json.load(f)
+                    logger.info(f"[ws] Settings backup loaded from {backup_file}, keys={list(backup_data.keys())}")
+                    await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_LOADED, {'found': True, 'settings': backup_data})))
+                else:
+                    logger.info(f"[ws] No settings backup found at {backup_file}")
+                    await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_LOADED, {'found': False})))
+            except Exception as e:
+                logger.error(f"[ws] Failed to load settings backup: {e}")
+                await websocket.send(json.dumps(create_event(EventType.SETTINGS_BACKUP_LOADED, {'found': False, 'error': str(e)})))
 
         else:
             logger.warning(f"Unknown message type: {msg_type}")

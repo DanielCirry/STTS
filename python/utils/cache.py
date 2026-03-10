@@ -21,8 +21,8 @@ def _get_cache_dir() -> Path:
     """Get or create the cache directory."""
     global _CACHE_DIR
     if not _CACHE_DIR or not str(_CACHE_DIR):
-        # Default: %APPDATA%\STTS\cache (consistent with other STTS data)
-        appdata = Path(os.environ.get('APPDATA', Path.home() / '.stts'))
+        # Default: %LOCALAPPDATA%\STTS\cache (consistent with other STTS data)
+        appdata = Path(os.environ.get('LOCALAPPDATA', os.environ.get('APPDATA', Path.home() / '.stts')))
         _CACHE_DIR = appdata / 'STTS' / 'cache'
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return _CACHE_DIR

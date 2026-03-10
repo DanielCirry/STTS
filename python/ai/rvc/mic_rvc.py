@@ -87,6 +87,10 @@ class MicRVCProcessor:
         self._output_queue: queue.Queue = queue.Queue(maxsize=10)
         self._process_thread: Optional[threading.Thread] = None
 
+        # Latency tracking
+        self._latency_warned: bool = False
+        self._consecutive_slow: int = 0
+
         # Callbacks
         self.on_error: Optional[Callable[[str], None]] = None
         self.on_status: Optional[Callable[[str, dict], None]] = None
@@ -171,8 +175,20 @@ class MicRVCProcessor:
         self._pitch_cache = None
         self._pitchf_cache = None
 
-        # Channels: stereo on Windows, mono elsewhere (matching working RVC)
-        self._channels = 1 if sys.platform == "darwin" else 2
+        # Determine channels based on device capability
+        import sounddevice as sd
+        try:
+            dev_info = sd.query_devices(self._input_device_id if self._input_device_id is not None else sd.default.device[0])
+            max_input_ch = dev_info.get('max_input_channels', 1)
+            # Use stereo on Windows if device supports it, else mono
+            if sys.platform == "darwin":
+                self._channels = 1
+            else:
+                self._channels = min(2, max_input_ch)
+            logger.info(f"[mic_rvc] Input device '{dev_info.get('name', '?')}' max_input_channels={max_input_ch}, using channels={self._channels}")
+        except Exception as e:
+            self._channels = 1  # Safe fallback to mono
+            logger.warning(f"[mic_rvc] Could not query input device channels ({e}), falling back to mono")
 
         # Clear queues
         while not self._input_queue.empty():
@@ -231,29 +247,47 @@ class MicRVCProcessor:
 
     def stop(self):
         """Stop real-time mic voice conversion."""
+        logger.info("[mic_rvc] stop() called, _running=%s", self._running)
         self._running = False
+
+        # Drain input queue so process thread can unblock quickly
+        while not self._input_queue.empty():
+            try:
+                self._input_queue.get_nowait()
+            except queue.Empty:
+                break
+
         if self._input_stream:
             try:
+                logger.debug("[mic_rvc] Stopping input stream")
                 self._input_stream.stop()
                 self._input_stream.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("[mic_rvc] Input stream stop error: %s", e)
             self._input_stream = None
         if self._output_stream:
             try:
+                logger.debug("[mic_rvc] Stopping output stream")
                 self._output_stream.stop()
                 self._output_stream.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("[mic_rvc] Output stream stop error: %s", e)
             self._output_stream = None
         if self._process_thread:
-            self._process_thread.join(timeout=2.0)
+            logger.debug("[mic_rvc] Joining process thread (timeout=5s)")
+            self._process_thread.join(timeout=5.0)
+            if self._process_thread.is_alive():
+                logger.warning("[mic_rvc] Process thread did not stop within 5s — abandoning")
+            else:
+                logger.debug("[mic_rvc] Process thread joined successfully")
             self._process_thread = None
         self._input_wav = None
         self._pitch_cache = None
         self._pitchf_cache = None
         self._sola_buffer = None
-        logger.debug("Mic RVC stopped")
+        self._latency_warned = False
+        self._consecutive_slow = 0
+        logger.info("[mic_rvc] Mic RVC stopped")
 
     def set_output_device(self, device_id: Optional[int]):
         """Change output device (requires restart)."""
@@ -272,6 +306,41 @@ class MicRVCProcessor:
             self.stop()
             self.start(out, inp)
         logger.debug(f"Mic RVC block duration set to {self._block_time}s")
+
+    def set_context_time(self, seconds: float):
+        """Adjust extra inference context (requires restart). More = better quality, more latency."""
+        self._context_time = max(0.2, min(3.0, seconds))
+        if self._running:
+            out = self._output_device_id
+            inp = self._input_device_id
+            self.stop()
+            self.start(out, inp)
+        logger.debug(f"Mic RVC context time set to {self._context_time}s")
+
+    def set_silence_threshold(self, threshold: float):
+        """Adjust silence/response threshold. Below this RMS, audio is passed through as silence."""
+        self._silence_threshold = max(0.0, min(0.05, threshold))
+        logger.debug(f"Mic RVC silence threshold set to {self._silence_threshold}")
+
+    def set_crossfade_ms(self, ms: float):
+        """Adjust SOLA crossfade length in milliseconds (requires restart)."""
+        global SOLA_BUFFER_MS
+        SOLA_BUFFER_MS = max(10, min(200, ms))
+        if self._running:
+            out = self._output_device_id
+            inp = self._input_device_id
+            self.stop()
+            self.start(out, inp)
+        logger.debug(f"Mic RVC crossfade set to {SOLA_BUFFER_MS}ms")
+
+    def get_performance_params(self) -> dict:
+        """Return current performance parameters."""
+        return {
+            'block_time': self._block_time,
+            'context_time': self._context_time,
+            'silence_threshold': self._silence_threshold,
+            'crossfade_ms': SOLA_BUFFER_MS,
+        }
 
     def _input_callback(self, indata: np.ndarray, frames: int,
                         time_info, status):
@@ -332,6 +401,46 @@ class MicRVCProcessor:
                 t0 = time.perf_counter()
                 callback_count += 1
 
+                # Queue cap: if >3 blocks queued, drop oldest to prevent unbounded latency growth
+                queued = self._input_queue.qsize()
+                if queued > 3:
+                    dropped = 0
+                    while queued > 1:
+                        try:
+                            self._input_queue.get_nowait()
+                            dropped += 1
+                            queued -= 1
+                        except queue.Empty:
+                            break
+                    # Use the latest block instead
+                    try:
+                        indata = self._input_queue.get_nowait()
+                        dropped += 1
+                    except queue.Empty:
+                        pass  # use the block we already have
+                    logger.warning(f"Mic RVC: dropped {dropped} queued blocks to prevent latency spiral (queue was {queued + dropped})")
+                    if not self._latency_warned:
+                        self._latency_warned = True
+                        logger.warning(
+                            "Mic RVC: processing is slower than real-time on CPU. "
+                            "Install CUDA PyTorch for real-time voice conversion. "
+                            "This warning will not repeat."
+                        )
+                        if self.on_status:
+                            self.on_status('rvc_latency_warning', {
+                                'message': 'RVC is too slow for real-time on CPU. Install CUDA PyTorch for better performance.'
+                            })
+
+                # Check running before processing (stop may have been called)
+                if not self._running:
+                    logger.debug("[mic_rvc] _running is False after dequeue, exiting loop")
+                    break
+
+                # Bail out if buffers were cleared by stop()
+                if self._input_wav is None:
+                    logger.debug("[mic_rvc] _input_wav is None, exiting loop")
+                    break
+
                 # Convert to mono
                 if indata.ndim == 1:
                     mono = indata.astype(np.float32)
@@ -360,6 +469,11 @@ class MicRVCProcessor:
                             pass
                         self._output_queue.put_nowait(silence)
                     continue
+
+                # Check running before heavy RVC inference
+                if not self._running:
+                    logger.debug("[mic_rvc] _running is False before RVC inference, exiting loop")
+                    break
 
                 # Resample full rolling buffer to 16kHz
                 buffer_16k = resample_poly(
@@ -457,11 +571,28 @@ class MicRVCProcessor:
 
                 elapsed = time.perf_counter() - t0
                 if elapsed > self._block_time:
-                    logger.warning(
-                        f"Mic RVC process #{callback_count}: {elapsed:.2f}s "
-                        f"(>{self._block_time:.2f}s block) — latency increasing"
-                    )
-                elif callback_count <= 3 or callback_count % 20 == 0:
+                    self._consecutive_slow += 1
+                    # Log warning but not every single block — first 3, then every 10th
+                    if self._consecutive_slow <= 3 or self._consecutive_slow % 10 == 0:
+                        logger.warning(
+                            f"Mic RVC process #{callback_count}: {elapsed:.2f}s "
+                            f"(>{self._block_time:.2f}s block) — latency increasing "
+                            f"(consecutive slow: {self._consecutive_slow})"
+                        )
+                    # One-time CUDA suggestion after 5 consecutive slow blocks
+                    if self._consecutive_slow == 5 and not self._latency_warned:
+                        self._latency_warned = True
+                        logger.warning(
+                            "Mic RVC: consistently slower than real-time. "
+                            "Install CUDA PyTorch for real-time voice conversion."
+                        )
+                        if self.on_status:
+                            self.on_status('rvc_latency_warning', {
+                                'message': 'RVC is too slow for real-time on CPU. Install CUDA PyTorch for better performance.'
+                            })
+                else:
+                    self._consecutive_slow = 0
+                if callback_count <= 3 or callback_count % 20 == 0:
                     logger.debug(
                         f"Mic RVC process #{callback_count}: {elapsed:.3f}s "
                         f"(block={self._block_time:.2f}s)"

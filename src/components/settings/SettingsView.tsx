@@ -4,13 +4,13 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Select } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
-import { useSettingsStore, useChatStore, type ComputeDevice, type TTSEngine, type AIProvider, type OutputProfile } from '@/stores'
+import { useSettingsStore, useChatStore, type ComputeDevice, type TTSEngine, type AIProvider, type OutputProfile, DEFAULT_RVC_PARAMS } from '@/stores'
+import { useNotificationStore } from '@/stores/notificationStore'
 import { useModelStore } from '@/stores/modelStore'
 import { useFeaturesStore } from '@/stores/featuresStore'
 import { useBackend } from '@/hooks/useBackend'
-import FeaturesManager from './FeaturesManager'
 
-type SettingsPage = 'main' | 'models' | 'translation' | 'tts' | 'ai' | 'voiceConversion' | 'overlay' | 'audio' | 'vrchat' | 'credentials' | 'features'
+type SettingsPage = 'main' | 'models' | 'translation' | 'tts' | 'ai' | 'voiceConversion' | 'overlay' | 'audio' | 'vrchat' | 'credentials'
 
 interface SettingsViewProps {
   onBack: () => void
@@ -18,7 +18,7 @@ interface SettingsViewProps {
 }
 
 const settingsPages = [
-  { id: 'models' as const, label: 'Speech Recognition', icon: Cpu },
+  { id: 'models' as const, label: 'Speech Recognition', icon: Mic },
   { id: 'translation' as const, label: 'Translation', icon: Languages },
   { id: 'tts' as const, label: 'Text-to-Speech', icon: Volume2 },
   { id: 'ai' as const, label: 'AI Assistant', icon: Bot },
@@ -27,7 +27,6 @@ const settingsPages = [
   { id: 'audio' as const, label: 'Audio', icon: Headphones },
   { id: 'vrchat' as const, label: 'OSC', icon: Send },
   { id: 'credentials' as const, label: 'API Credentials', icon: Key },
-  { id: 'features' as const, label: 'Install Features', icon: Download },
 ]
 
 // Common languages for the translation settings
@@ -84,8 +83,6 @@ export function SettingsView({ onBack, initialPage }: SettingsViewProps) {
         return <VRChatSettings />
       case 'credentials':
         return <CredentialsSettings />
-      case 'features':
-        return <FeaturesManager />
       default:
         return <MainSettingsPage onNavigate={setCurrentPage} />
     }
@@ -134,11 +131,22 @@ const TTS_ENGINE_OPTIONS_ALL = [
 ]
 
 const AI_PROVIDER_OPTIONS = [
+  { value: 'free', label: 'Free' },
   { value: 'local', label: 'Local LLM' },
   { value: 'groq', label: 'Groq' },
   { value: 'google', label: 'Gemini' },
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic' },
+]
+
+const QUICK_STT_MODELS = [
+  { value: 'whisper-tiny', label: 'Tiny' },
+  { value: 'whisper-base', label: 'Base' },
+  { value: 'whisper-small', label: 'Small' },
+  { value: 'whisper-medium', label: 'Medium' },
+  { value: 'whisper-large-v2', label: 'Large v2' },
+  { value: 'whisper-large-v3', label: 'Large v3' },
+  { value: 'whisper-large-v3-turbo', label: 'Turbo' },
 ]
 
 const QUICK_LANG_OPTIONS = [
@@ -189,20 +197,66 @@ function DeviceToggle({
 
 function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage) => void }) {
   const settings = useSettingsStore()
-  const { sendMessage, connected } = useBackend()
+  const { sendMessage, connected, lastMessage, getLocalModels, loadLocalModel } = useBackend()
   const isRvcModelLoaded = useChatStore((s) => s.isRvcModelLoaded)
   const isMicRvcActive = useChatStore((s) => s.isMicRvcActive)
   const quickVoices = useChatStore((s) => s.ttsVoices)
   const voicevoxInstalled = useFeaturesStore((s) => s.voicevoxInstalled)
+  const [localLLMModels, setLocalLLMModels] = useState<{ id: string; name: string; path: string }[]>([])
+  const [gpuInfo, setGpuInfo] = useState<GpuInfo | null>(null)
+
+  // Request GPU info on mount
+  useEffect(() => {
+    console.log('[QuickSettings] Mount — requesting gpu_info')
+    sendMessage({ type: 'get_gpu_info' })
+  }, [sendMessage])
+
+  // Fetch local LLM models when AI provider is local
+  useEffect(() => {
+    if (connected && settings.ai.provider === 'local') {
+      console.log('[QuickSettings] Fetching local LLM models')
+      getLocalModels()
+    }
+  }, [connected, settings.ai.provider, getLocalModels])
+
+  // Handle local_models response + GPU info
+  useEffect(() => {
+    if (lastMessage?.type === 'local_models') {
+      const models = (lastMessage.payload as { models?: Array<{ id?: string; name?: string; path?: string; downloaded?: boolean }> }).models || []
+      const downloaded = models.filter(m => m.downloaded).map(m => ({
+        id: m.id || m.path || '',
+        name: m.name || (m.path || '').replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || 'Unknown',
+        path: m.path || m.id || '',
+      }))
+      console.log('[QuickSettings] Local LLM models:', downloaded.length)
+      setLocalLLMModels(downloaded)
+    }
+    if (lastMessage?.type === 'gpu_info') {
+      console.log('[QuickSettings] Received gpu_info:', lastMessage.payload)
+      setGpuInfo(lastMessage.payload as unknown as GpuInfo)
+    }
+  }, [lastMessage])
 
   // Fetch voices when engine changes or connection comes up
+  // Track previous engine to only clear voices when engine actually changes (avoids "Loading..." flash on settings page visit)
+  const prevEngineRef = useRef(settings.tts.engine)
   useEffect(() => {
     if (!connected) return
-    useChatStore.getState().setTtsVoices([]) // Clear old voices immediately on engine change
-    if (settings.tts.engine === 'voicevox') {
-      sendMessage({ type: 'fetch_voicevox_voices' })
-    } else {
-      sendMessage({ type: 'get_tts_voices', payload: { engine: settings.tts.engine } })
+    const engineChanged = prevEngineRef.current !== settings.tts.engine
+    prevEngineRef.current = settings.tts.engine
+    // Only clear voices when engine actually changed, not on every mount/reconnect
+    if (engineChanged) {
+      console.log('[QuickSettings] TTS engine changed, clearing old voices')
+      useChatStore.getState().setTtsVoices([])
+    }
+    // Always fetch if we have no voices (first load) or engine changed
+    if (engineChanged || useChatStore.getState().ttsVoices.length === 0) {
+      console.log('[QuickSettings] Fetching TTS voices for engine:', settings.tts.engine)
+      if (settings.tts.engine === 'voicevox') {
+        sendMessage({ type: 'fetch_voicevox_voices' })
+      } else {
+        sendMessage({ type: 'get_tts_voices', payload: { engine: settings.tts.engine } })
+      }
     }
   }, [settings.tts.engine, connected, sendMessage])
 
@@ -236,41 +290,111 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
   /** Global device change: sets ALL component devices at once */
   const setGlobalDevice = (d: 'cpu' | 'cuda') => {
     console.log('[Settings] Global device change', d)
+    setGlobalDeviceState(d)
     settings.updateSTT({ device: d })
     settings.updateTTS({ device: d })
     settings.updateTranslation({ device: d })
     settings.updateAI({ device: d })
     settings.updateRVC({ rvcDevice: d })
-    sendMessage({ type: 'update_settings', payload: { stt: { device: d }, tts: { device: d }, translation: { device: d }, ai: { device: d } } })
+    settings.updateOCR({ device: d })
+    sendMessage({ type: 'update_settings', payload: { stt: { device: d }, tts: { device: d }, translation: { device: d }, ai: { device: d }, ocr: { device: d } } })
     sendMessage({ type: 'rvc_set_device', payload: { device: d } })
     restartForDevice()
   }
 
-  // Global shows GPU only when ALL components are on GPU
-  const allGpu = settings.stt.device === 'cuda' && settings.tts.device === 'cuda' &&
-    settings.translation.device === 'cuda' && settings.ai.device === 'cuda' && settings.rvc.rvcDevice === 'cuda'
-  const globalDevice = allGpu ? 'cuda' : 'cpu'
+  // Track global device independently — only changes when user explicitly clicks "All Models"
+  const [globalDevice, setGlobalDeviceState] = useState<'cpu' | 'cuda'>(() => {
+    const allGpu = settings.stt.device === 'cuda' && settings.tts.device === 'cuda' &&
+      settings.translation.device === 'cuda' && settings.ai.device === 'cuda' && settings.rvc.rvcDevice === 'cuda' &&
+      settings.ocr.device === 'cuda'
+    return allGpu ? 'cuda' : 'cpu'
+  })
 
   return (
     <div className="space-y-3">
       <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Quick Settings</h4>
 
+      {/* CPU-only torch warning */}
+      {(() => {
+        const features = useFeaturesStore.getState().status?.features
+        const torchVersion = features?.['torch_cpu']?.version || features?.['torch_cuda']?.version || ''
+        const hasCpuSuffix = torchVersion.includes('+cpu') || torchVersion.includes('cpu')
+        const torchInstalled = features?.['torch_cpu']?.installed || features?.['torch_cuda']?.installed
+        if (torchInstalled && hasCpuSuffix) {
+          return (
+            <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 p-2.5">
+              <p className="text-xs text-yellow-400">
+                CPU-only PyTorch installed. Reinstall PyTorch (CUDA) from the setup page for GPU support.
+              </p>
+            </div>
+          )
+        }
+        return null
+      })()}
+
+      {/* GPU Info Card */}
+      {gpuInfo && gpuInfo.available && (
+        <div className="rounded-lg bg-green-500/10 border border-green-500/20 p-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Cpu className="w-4 h-4 text-green-400" />
+              <span className="text-sm font-medium text-green-400">{gpuInfo.name || 'GPU'}</span>
+            </div>
+            {gpuInfo.vram_total_mb > 0 && (
+              <span className="text-xs text-muted-foreground">
+                {Math.round(gpuInfo.vram_used_mb)}MB / {Math.round(gpuInfo.vram_total_mb)}MB VRAM
+              </span>
+            )}
+          </div>
+          {gpuInfo.vram_total_mb > 0 && (
+            <div className="mt-2 h-1.5 bg-green-500/20 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-green-500 rounded-full transition-all"
+                style={{ width: `${Math.min(100, (gpuInfo.vram_used_mb / gpuInfo.vram_total_mb) * 100)}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+      {gpuInfo && !gpuInfo.available && gpuInfo.name !== undefined && (
+        <div className="rounded-lg bg-secondary/50 border border-border p-3">
+          <p className="text-xs text-muted-foreground">
+            GPU not detected. Models will run on CPU.
+          </p>
+        </div>
+      )}
+
       {/* Row 1: Global Compute — sets all components at once */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
+      <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2 p-2.5 rounded-lg bg-secondary/30">
         <div className="flex items-center gap-2">
           <Cpu className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm">All Models</span>
           <span className="text-[10px] text-muted-foreground">(sets all at once)</span>
         </div>
+        <div />
         <DeviceToggle device={globalDevice} onChange={setGlobalDevice} />
       </div>
 
-      {/* Row 2: STT */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
+      {/* Row 2: STT — LEFT: icon+label, MIDDLE: model dropdown, RIGHT: CPU/GPU */}
+      <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2 p-2.5 rounded-lg bg-secondary/30">
         <div className="flex items-center gap-2">
           <Mic className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm">STT</span>
         </div>
+        <select
+          value={settings.stt.model}
+          onChange={(e) => {
+            const model = e.target.value
+            console.log('[Settings] STT model change (quick)', model)
+            settings.updateSTT({ model })
+            sendMessage({ type: 'update_settings', payload: { stt: { model } } })
+          }}
+          className="bg-secondary border border-border rounded px-2 py-1 text-xs w-24"
+        >
+          {QUICK_STT_MODELS.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
         <DeviceToggle
           device={settings.stt.device}
           onChange={(d) => {
@@ -282,84 +406,101 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
         />
       </div>
 
-      {/* Row 3: TTS — device + engine */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
+      {/* Row 3: TTS — LEFT: icon+label, MIDDLE: voice + engine dropdowns, RIGHT: CPU/GPU */}
+      <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2 p-2.5 rounded-lg bg-secondary/30">
         <div className="flex items-center gap-2">
           <Volume2 className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm">TTS</span>
         </div>
         <div className="flex items-center gap-2">
-          <DeviceToggle
-            device={settings.tts.device}
-            onChange={(d) => {
-              console.log('[Settings] TTS device change', d)
-              settings.updateTTS({ device: d })
-              sendMessage({ type: 'update_settings', payload: { tts: { device: d } } })
-              restartForDevice()
+          <select
+            value={settings.tts.voice}
+            onChange={(e) => {
+              const voice = e.target.value
+              console.log('[Settings] TTS voice change (quick)', voice)
+              const voicePerEngine = { ...(settings.tts.voicePerEngine ?? {}), [settings.tts.engine]: voice }
+              settings.updateTTS({ voice, voicePerEngine })
+              sendMessage({ type: 'update_settings', payload: { tts: { voice } } })
             }}
-          />
+            disabled={quickVoices.length === 0}
+            className="bg-secondary border border-border rounded px-2 py-1 text-xs max-w-[130px]"
+          >
+            {quickVoices.length === 0 ? (
+              <option value={settings.tts.voice}>Loading...</option>
+            ) : (
+              quickVoices.map(v => (
+                <option key={v.id} value={v.id}>{v.name}</option>
+              ))
+            )}
+          </select>
           <select
             value={settings.tts.engine}
             onChange={(e) => {
               const engine = e.target.value as TTSEngine
-              console.log('[Settings] TTS engine change', engine)
-              // Save current voice for the old engine before switching
+              console.log('[Settings] TTS engine change (quick)', engine)
               const voicePerEngine = { ...(settings.tts.voicePerEngine ?? {}), [settings.tts.engine]: settings.tts.voice }
               settings.updateTTS({ engine, voicePerEngine })
               sendMessage({ type: 'update_settings', payload: { tts: { engine } } })
+              // VOICEVOX auto-install/start from quick settings
+              if (engine === 'voicevox') {
+                if (!voicevoxInstalled) {
+                  console.log('[QuickSettings] VOICEVOX not installed, auto-downloading')
+                  sendMessage({ type: 'voicevox_download_engine', payload: { build_type: settings.tts.voicevoxBuildType || 'directml' } })
+                } else {
+                  console.log('[QuickSettings] VOICEVOX installed, auto-starting engine')
+                  sendMessage({ type: 'voicevox_start_engine' })
+                }
+              }
+              // Stop VOICEVOX when switching away
+              if (settings.tts.engine === 'voicevox' && engine !== 'voicevox') {
+                console.log('[QuickSettings] Switching away from VOICEVOX, stopping engine')
+                sendMessage({ type: 'voicevox_stop_engine' })
+              }
             }}
             className="bg-secondary border border-border rounded px-2 py-1 text-xs w-24"
           >
             {TTS_ENGINE_OPTIONS_ALL
-              .filter(o => o.value !== 'voicevox' || voicevoxInstalled)
               .map(o => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
         </div>
-      </div>
-
-      {/* Row 3b: TTS Voice — dropdown for quick selection */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4">
-        <span className="text-xs text-muted-foreground">Voice</span>
-        <select
-          value={settings.tts.voice}
-          onChange={(e) => {
-            const voice = e.target.value
-            console.log('[Settings] TTS voice change', voice)
-            const voicePerEngine = { ...(settings.tts.voicePerEngine ?? {}), [settings.tts.engine]: voice }
-            settings.updateTTS({ voice, voicePerEngine })
-            sendMessage({ type: 'update_settings', payload: { tts: { voice } } })
+        <DeviceToggle
+          device={settings.tts.device}
+          onChange={(d) => {
+            console.log('[Settings] TTS device change', d)
+            settings.updateTTS({ device: d })
+            sendMessage({ type: 'update_settings', payload: { tts: { device: d } } })
+            restartForDevice()
           }}
-          disabled={quickVoices.length === 0}
-          className="bg-secondary border border-border rounded px-2 py-1 text-xs max-w-[200px]"
-        >
-          {quickVoices.length === 0 ? (
-            <option value={settings.tts.voice}>Loading voices...</option>
-          ) : (
-            quickVoices.map(v => (
-              <option key={v.id} value={v.id}>{v.name}</option>
-            ))
-          )}
-        </select>
+        />
       </div>
 
-      {/* Row 5: Translation — device + provider */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
+      {/* Row 4: Translation — LEFT: icon+label, MIDDLE: model+provider dropdowns, RIGHT: CPU/GPU */}
+      <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2 p-2.5 rounded-lg bg-secondary/30">
         <div className="flex items-center gap-2">
           <Languages className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm">Translate</span>
         </div>
         <div className="flex items-center gap-2">
-          <DeviceToggle
-            device={settings.translation.device}
-            onChange={(d) => {
-              console.log('[Settings] Translation device change', d)
-              settings.updateTranslation({ device: d })
-              sendMessage({ type: 'update_settings', payload: { translation: { device: d } } })
-              restartForDevice()
-            }}
-          />
+          {settings.translation.provider === 'local' && (
+            <select
+              value={settings.translation.model}
+              onChange={(e) => {
+                const model = e.target.value
+                console.log('[Settings] Translation model change (quick)', model)
+                settings.updateTranslation({ model })
+                if (settings.translation.enabled) {
+                  sendMessage({ type: 'load_model', payload: { type: 'translation', model_id: model } })
+                }
+              }}
+              className="bg-secondary border border-border rounded px-2 py-1 text-xs max-w-[120px]"
+            >
+              {TRANSLATION_MODELS.map(m => (
+                <option key={m.value} value={m.value}>{m.label.split(' - ')[0]}</option>
+              ))}
+            </select>
+          )}
           <select
             value={settings.translation.provider}
             onChange={(e) => {
@@ -376,10 +517,19 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
             <option value="google">Google</option>
           </select>
         </div>
+        <DeviceToggle
+          device={settings.translation.device}
+          onChange={(d) => {
+            console.log('[Settings] Translation device change', d)
+            settings.updateTranslation({ device: d })
+            sendMessage({ type: 'update_settings', payload: { translation: { device: d } } })
+            restartForDevice()
+          }}
+        />
       </div>
 
-      {/* Row 6: AI Assistant */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
+      {/* Row 5: AI Assistant — LEFT: icon+label+badge, MIDDLE: model + provider dropdowns, RIGHT: CPU/GPU */}
+      <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2 p-2.5 rounded-lg bg-secondary/30">
         <div className="flex items-center gap-2">
           <Bot className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm">AI</span>
@@ -394,20 +544,61 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
           )}
         </div>
         <div className="flex items-center gap-2">
-          <DeviceToggle
-            device={settings.ai.device}
-            onChange={(d) => {
-              console.log('[Settings] AI device change', d)
-              settings.updateAI({ device: d })
-              sendMessage({ type: 'update_settings', payload: { ai: { device: d } } })
-              restartForDevice()
-            }}
-          />
+          {/* Model dropdown — cloud models or local model name */}
+          {settings.ai.provider !== 'local' && CLOUD_MODELS[settings.ai.provider] ? (
+            <select
+              key={`cloud-${settings.ai.provider}-${settings.ai.cloudModels?.[settings.ai.provider] || ''}`}
+              value={settings.ai.cloudModels?.[settings.ai.provider] || CLOUD_MODELS[settings.ai.provider][0]?.value}
+              onChange={(e) => {
+                const model = e.target.value
+                console.log('[Settings] AI cloud model change (quick)', model)
+                settings.updateAI({ cloudModels: { ...settings.ai.cloudModels, [settings.ai.provider]: model } })
+                sendMessage({ type: 'update_settings', payload: { ai: { cloud_model: model, provider: settings.ai.provider } } })
+              }}
+              className="bg-secondary border border-border rounded px-2 py-1 text-xs max-w-[140px]"
+            >
+              {CLOUD_MODELS[settings.ai.provider].map(m => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+          ) : settings.ai.provider === 'local' ? (
+            localLLMModels.length > 0 ? (
+              <select
+                key={`local-${settings.ai.localModel || ''}`}
+                value={settings.ai.localModel || ''}
+                onChange={(e) => {
+                  const modelPath = e.target.value
+                  console.log('[QuickSettings] Local LLM model change', modelPath)
+                  if (modelPath) {
+                    settings.updateAI({ localModel: modelPath })
+                    loadLocalModel(modelPath)
+                  }
+                }}
+                className="bg-secondary border border-border rounded px-2 py-1 text-xs max-w-[140px]"
+              >
+                {!settings.ai.localModel && <option value="">Select model</option>}
+                {localLLMModels.map(m => (
+                  <option key={m.path} value={m.path}>{m.name}</option>
+                ))}
+              </select>
+            ) : (
+              <span
+                className="text-xs truncate max-w-[120px] text-muted-foreground cursor-pointer hover:text-foreground"
+                onClick={() => onNavigate('ai')}
+                title="Go to AI settings to configure models"
+              >
+                {settings.ai.localModel
+                  ? settings.ai.localModel.replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || settings.ai.localModel
+                  : 'No models →'}
+              </span>
+            )
+          ) : null}
+          {/* Provider dropdown */}
           <select
             value={settings.ai.provider}
             onChange={(e) => {
               const provider = e.target.value as AIProvider
-              console.log('[Settings] AI provider change', provider)
+              console.log('[Settings] AI provider change (quick)', provider)
               settings.updateAI({ provider })
               sendMessage({ type: 'update_settings', payload: { ai: { provider } } })
             }}
@@ -418,55 +609,19 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
             ))}
           </select>
         </div>
+        <DeviceToggle
+          device={settings.ai.device}
+          onChange={(d) => {
+            console.log('[Settings] AI device change', d)
+            settings.updateAI({ device: d })
+            sendMessage({ type: 'update_settings', payload: { ai: { device: d } } })
+            restartForDevice()
+          }}
+        />
       </div>
 
-      {/* Row 6b: AI Model — submenu for cloud model or local model name */}
-      {settings.ai.provider !== 'local' && CLOUD_MODELS[settings.ai.provider] && (
-        <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4 min-h-[40px]">
-          <span className="text-xs text-muted-foreground">Model</span>
-          <select
-            value={settings.ai.cloudModels?.[settings.ai.provider] || CLOUD_MODELS[settings.ai.provider][0]?.value}
-            onChange={(e) => {
-              const model = e.target.value
-              console.log('[Settings] AI cloud model change (quick)', model)
-              settings.updateAI({ cloudModels: { ...settings.ai.cloudModels, [settings.ai.provider]: model } })
-              sendMessage({ type: 'update_settings', payload: { ai: { cloud_model: model, provider: settings.ai.provider } } })
-            }}
-            className="bg-secondary border border-border rounded px-2 py-1 text-xs max-w-[200px]"
-          >
-            {CLOUD_MODELS[settings.ai.provider].map(m => (
-              <option key={m.value} value={m.value}>{m.label}</option>
-            ))}
-          </select>
-        </div>
-      )}
-      {settings.ai.provider === 'local' && (
-        <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4 min-h-[40px]">
-          <span className="text-xs text-muted-foreground">Model</span>
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs truncate max-w-[160px]">
-              {settings.ai.localModel
-                ? settings.ai.localModel.replace(/\\/g, '/').split('/').pop()?.replace(/\.gguf$/i, '') || settings.ai.localModel
-                : 'None loaded'}
-            </span>
-            {settings.ai.localModel && (
-              <button
-                onClick={() => {
-                  console.log('[Settings] Quick unload LLM')
-                  sendMessage({ type: 'unload_llm' })
-                }}
-                className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-secondary hover:bg-destructive/20 hover:text-destructive transition-colors border border-border shrink-0"
-                title="Unload model"
-              >
-                Unload
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Row 6: RVC — device + Mic/TTS buttons */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
+      {/* Row 6: RVC — LEFT: icon+label+badge, MIDDLE: model dropdown + Mic+TTS, RIGHT: CPU/GPU */}
+      <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2 p-2.5 rounded-lg bg-secondary/30">
         <div className="flex items-center gap-2">
           <AudioLines className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm">RVC</span>
@@ -477,24 +632,37 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
           )}
         </div>
         <div className="flex items-center gap-2">
-          <DeviceToggle
-            device={settings.rvc.rvcDevice}
-            onChange={(d) => {
-              console.log('[Settings] RVC device change', d)
-              settings.updateRVC({ rvcDevice: d })
-              sendMessage({ type: 'rvc_set_device', payload: { device: d } })
-              restartForDevice()
-            }}
-          />
+          {settings.rvc.recentModels && settings.rvc.recentModels.length > 0 ? (
+            <select
+              value={settings.rvc.modelPath || ''}
+              onChange={(e) => {
+                const path = e.target.value
+                const model = settings.rvc.recentModels.find(m => m.path === path)
+                console.log('[Settings] RVC model select (quick)', model?.name || path)
+                if (model) {
+                  settings.updateRVC({ modelPath: model.path, indexPath: model.indexPath })
+                  sendMessage({ type: 'rvc_load_model', payload: { model_path: model.path, index_path: model.indexPath } })
+                }
+              }}
+              className="bg-secondary border border-border rounded px-2 py-1 text-xs max-w-[120px] truncate"
+            >
+              <option value="">Select model</option>
+              {settings.rvc.recentModels.map(m => (
+                <option key={m.path} value={m.path}>{m.name}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-xs text-muted-foreground">No models</span>
+          )}
           <button
             onClick={() => {
               console.log('[Settings] RVC Mic button clicked', { isRvcModelLoaded, isMicRvcActive })
               if (!isRvcModelLoaded) { onNavigate('voiceConversion'); return }
               if (isMicRvcActive) {
-                useChatStore.getState().setMicRvcActive(false)  // Optimistic update
+                useChatStore.getState().setMicRvcActive(false)
                 sendMessage({ type: 'rvc_mic_stop' })
               } else {
-                useChatStore.getState().setMicRvcActive(true)   // Optimistic update
+                useChatStore.getState().setMicRvcActive(true)
                 sendMessage({ type: 'rvc_mic_start', payload: { output_device_id: settings.rvc.micRvcOutputDeviceId } })
               }
             }}
@@ -529,31 +697,41 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
             TTS
           </button>
         </div>
+        <DeviceToggle
+          device={settings.rvc.rvcDevice}
+          onChange={(d) => {
+            console.log('[Settings] RVC device change', d)
+            settings.updateRVC({ rvcDevice: d })
+            sendMessage({ type: 'rvc_set_device', payload: { device: d } })
+            restartForDevice()
+          }}
+        />
       </div>
 
-      {/* Row 8: VR Translation */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30">
+      {/* Row 7: VR Translation — LEFT: icon+label, MIDDLE: interval + Manual/Auto, RIGHT: CPU/GPU */}
+      <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2 p-2.5 rounded-lg bg-secondary/30">
         <div className="flex items-center gap-2">
           <ScanText className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm">VRT</span>
-          <Switch
-            checked={settings.ocr.enabled}
-            onCheckedChange={(v) => {
-              console.log('[Settings] VRT quick toggle', v)
-              settings.updateOCR({ enabled: v })
-              sendMessage({ type: 'update_settings', payload: { ocr: { enabled: v } } })
-            }}
-          />
         </div>
         <div className="flex items-center gap-2">
-          <DeviceToggle
-            device={settings.ocr.device}
-            onChange={(d) => {
-              console.log('[Settings] VRT device change', d)
-              settings.updateOCR({ device: d })
-              sendMessage({ type: 'update_settings', payload: { ocr: { device: d } } })
+          <select
+            value={settings.ocr.interval}
+            disabled={settings.ocr.mode !== 'automatic'}
+            onChange={(e) => {
+              const s = parseInt(e.target.value)
+              console.log('[Settings] VRT interval change', s)
+              settings.updateOCR({ interval: s })
+              sendMessage({ type: 'update_settings', payload: { ocr: { interval: s } } })
             }}
-          />
+            className={`bg-secondary border border-border rounded px-2 py-1 text-xs ${
+              settings.ocr.mode !== 'automatic' ? 'opacity-40 cursor-not-allowed' : ''
+            }`}
+          >
+            {[2, 3, 5, 7, 10].map(s => (
+              <option key={s} value={s}>{s}s</option>
+            ))}
+          </select>
           <div className="flex items-center gap-0.5 bg-secondary/60 rounded p-0.5">
             <button
               onClick={() => {
@@ -585,32 +763,14 @@ function QuickSettingsSection({ onNavigate }: { onNavigate: (page: SettingsPage)
             </button>
           </div>
         </div>
-      </div>
-      {/* VRT Interval */}
-      <div className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/20 ml-4">
-        <span className="text-xs text-muted-foreground">Interval</span>
-        <div className="flex items-center gap-1">
-          {[1, 2, 3, 5, 10].map(s => (
-            <button
-              key={s}
-              disabled={settings.ocr.mode !== 'automatic'}
-              onClick={() => {
-                console.log('[Settings] VRT interval change', s)
-                settings.updateOCR({ interval: s })
-                sendMessage({ type: 'update_settings', payload: { ocr: { interval: s } } })
-              }}
-              className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                settings.ocr.mode !== 'automatic'
-                  ? 'opacity-40 cursor-not-allowed bg-secondary text-muted-foreground'
-                  : settings.ocr.interval === s
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-secondary hover:bg-secondary/80 text-muted-foreground'
-              }`}
-            >
-              {s}s
-            </button>
-          ))}
-        </div>
+        <DeviceToggle
+          device={settings.ocr.device}
+          onChange={(d) => {
+            console.log('[Settings] VRT device change', d)
+            settings.updateOCR({ device: d })
+            sendMessage({ type: 'update_settings', payload: { ocr: { device: d } } })
+          }}
+        />
       </div>
     </div>
   )
@@ -755,6 +915,7 @@ function ModelCard({
   isLoaded,
   downloadProgress,
   onClick,
+  onUnload,
 }: {
   model: { id: string; name: string; size: string; description: string }
   isCurrent: boolean
@@ -762,18 +923,19 @@ function ModelCard({
   isLoaded: boolean
   downloadProgress?: number
   onClick: () => void
+  onUnload?: () => void
 }) {
   const isDownloading = downloadProgress !== undefined && downloadProgress > 0 && downloadProgress < 100
 
   return (
     <button
-      onClick={() => !isLoading && onClick()}
+      onClick={() => !isLoading && !isLoaded && onClick()}
       disabled={isLoading}
       className={`w-full text-left p-3 rounded-lg border transition-all relative overflow-hidden ${
-        isCurrent
-          ? isLoaded
-            ? 'border-green-600/50'
-            : 'border-primary/50'
+        isCurrent && isLoaded
+          ? 'border-white/70'
+          : isCurrent
+          ? 'border-primary/50'
           : 'bg-secondary border-border hover:border-primary/30'
       } ${isLoading ? 'opacity-70' : ''}`}
     >
@@ -800,51 +962,95 @@ function ModelCard({
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">{model.description}</p>
         </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {isCurrent && isLoaded && onUnload && (
+            <span
+              role="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                console.log('[Settings] Unload STT model', model.id)
+                onUnload()
+              }}
+              className="px-2 py-0.5 rounded text-[10px] font-medium bg-secondary hover:bg-destructive/20 hover:text-destructive transition-colors border border-border cursor-pointer"
+              title="Unload model from memory"
+            >
+              Unload
+            </span>
+          )}
+          <WifiOff className="w-4 h-4 text-muted-foreground" />
+        </div>
       </div>
-      {/* Download/loading progress — green background fill like Features page */}
-      {(isCurrent && (isLoading || isLoaded)) && (
+      {/* Download progress bar */}
+      {isCurrent && isLoading && isDownloading && (
         <div
           className="absolute inset-0 rounded-lg transition-all duration-500"
           style={{
-            background: isLoaded
-              ? 'rgba(40, 120, 60, 0.3)'
-              : 'rgba(40, 120, 60, 0.2)',
-            width: isLoaded
-              ? '100%'
-              : isDownloading
-              ? `${downloadProgress}%`
-              : '100%',
+            background: 'rgba(40, 120, 60, 0.15)',
+            width: `${downloadProgress}%`,
           }}
         />
       )}
       {isCurrent && isLoading && !isDownloading && (
         <div
-          className="absolute inset-0 rounded-lg animate-pulse"
-          style={{ background: 'linear-gradient(90deg, transparent 0%, rgba(80,180,100,0.08) 50%, transparent 100%)' }}
+          className="absolute left-0 top-0 bottom-0 rounded-lg"
+          style={{
+            background: 'rgba(40, 120, 60, 0.15)',
+            animation: 'modelLoadFill 30s ease-out forwards',
+          }}
         />
       )}
+      <style>{`
+        @keyframes modelLoadFill {
+          0% { width: 0%; }
+          20% { width: 50%; }
+          50% { width: 75%; }
+          80% { width: 92%; }
+          100% { width: 100%; opacity: 0; }
+        }
+      `}</style>
     </button>
   )
 }
 
 function ModelsSettings() {
   const { stt, updateSTT } = useSettingsStore()
-  const { loadModel, updateSettings, status, sendMessage, lastMessage } = useBackend()
+  const { loadModel, updateSettings, status, sendMessage, lastMessage, connected, startListening, stopListening, unloadSTT } = useBackend()
+  const isListening = useChatStore((s) => s.isListening)
   const modelStore = useModelStore()
+  const featuresStatus = useFeaturesStore((s) => s.status)
   const [loadingModelId, setLoadingModelId] = useState<string | null>(null)
-  const [gpuInfo, setGpuInfo] = useState<GpuInfo | null>(null)
+  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Request GPU info on mount
+  // Request current status on mount
   useEffect(() => {
-    sendMessage({ type: 'get_gpu_info' })
+    console.log('[ModelsSettings] Mount — requesting get_status')
+    sendMessage({ type: 'get_status' })
   }, [sendMessage])
 
-  // Handle GPU info response
+  // Handle stt_model_loaded / stt_model_error / model_loaded / model_error for timeout reset
   useEffect(() => {
-    if (lastMessage?.type === 'gpu_info') {
-      setGpuInfo(lastMessage.payload as unknown as GpuInfo)
+    if (!lastMessage) return
+    if (lastMessage.type === 'model_loaded' && (lastMessage.payload as Record<string, unknown>).type === 'stt') {
+      console.log('[ModelsSettings] STT model loaded, clearing loading state and timeout')
+      setLoadingModelId(null)
+      if (loadingTimeoutRef.current) { clearTimeout(loadingTimeoutRef.current); loadingTimeoutRef.current = null }
     }
-  }, [lastMessage])
+    if (lastMessage.type === 'model_error' && (lastMessage.payload as Record<string, unknown>).type === 'stt') {
+      console.log('[ModelsSettings] STT model error, clearing loading state and timeout')
+      setLoadingModelId(null)
+      if (loadingTimeoutRef.current) { clearTimeout(loadingTimeoutRef.current); loadingTimeoutRef.current = null }
+    }
+    if (lastMessage.type === 'stt_unloaded') {
+      const p = lastMessage.payload as { success?: boolean }
+      console.log('[ModelsSettings] STT model unloaded, success:', p.success)
+      if (p.success) {
+        setLoadingModelId(null)
+        // Clear model status in modelStore so card shows as not loaded
+        const sttModels = modelStore.models.filter(m => m.category === 'stt')
+        sttModels.forEach(m => modelStore.updateModelStatus(m.id, 'not_installed'))
+      }
+    }
+  }, [lastMessage, modelStore])
 
   // Track model loading state from modelStore
   useEffect(() => {
@@ -858,11 +1064,27 @@ function ModelsSettings() {
     }
   }, [modelStore.models])
 
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (loadingTimeoutRef.current) { clearTimeout(loadingTimeoutRef.current); loadingTimeoutRef.current = null }
+    }
+  }, [])
+
   const handleSelectSTTModel = (modelId: string) => {
     console.log('[Settings] Select STT model', modelId)
     updateSTT({ model: modelId })
     setLoadingModelId(modelId)
     loadModel('stt', modelId)
+
+    // 120s timeout — if no model_loaded or model_error, reset loading state
+    if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current)
+    loadingTimeoutRef.current = setTimeout(() => {
+      console.log('[ModelsSettings] STT model load timeout (120s) — resetting loading state for', modelId)
+      setLoadingModelId(null)
+      // Also reset model status in modelStore so the card stops showing loading
+      modelStore.updateModelStatus(modelId, 'error', undefined, 'Load timed out (120s)')
+    }, 120000)
   }
 
   const handleDeviceChange = (device: ComputeDevice) => {
@@ -886,10 +1108,6 @@ function ModelsSettings() {
   const isSTTLoading = (modelId: string) => loadingModelId === modelId
   const isSTTLoaded = (modelId: string) => getModelStatus(modelId) === 'loaded'
 
-  // GPU status from backend status
-  const backendGpu = (status as unknown as Record<string, unknown>)?.gpu as GpuInfo | undefined
-  const gpu = gpuInfo || backendGpu
-
   return (
     <div className="p-4 space-y-6">
       <div>
@@ -911,51 +1129,33 @@ function ModelsSettings() {
         <Switch
           checked={stt.enabled}
           onCheckedChange={(checked) => {
-            console.log('[Settings] STT enabled toggle', checked)
+            console.log('[Settings] STT enabled toggle', checked, '→ also syncing runtime listening state')
             updateSTT({ enabled: checked })
             updateSettings({ stt: { enabled: checked } })
+            // Sync runtime listening state with persisted setting
+            if (connected) {
+              if (checked && !isListening) {
+                console.log('[Settings] STT enabled ON → calling startListening()')
+                startListening()
+              } else if (!checked && isListening) {
+                console.log('[Settings] STT enabled OFF → calling stopListening()')
+                stopListening()
+              }
+            }
           }}
         />
       </div>
 
-      {/* GPU Info Display */}
-      {gpu && gpu.available && (
-        <div className="rounded-lg bg-green-500/10 border border-green-500/20 p-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Cpu className="w-4 h-4 text-green-400" />
-              <span className="text-sm font-medium text-green-400">{gpu.name || 'GPU'}</span>
-            </div>
-            {gpu.vram_total_mb > 0 && (
-              <span className="text-xs text-muted-foreground">
-                {Math.round(gpu.vram_used_mb)}MB / {Math.round(gpu.vram_total_mb)}MB VRAM
-              </span>
-            )}
-          </div>
-          {gpu.vram_total_mb > 0 && (
-            <div className="mt-2 h-1.5 bg-green-500/20 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-green-500 rounded-full transition-all"
-                style={{ width: `${Math.min(100, (gpu.vram_used_mb / gpu.vram_total_mb) * 100)}%` }}
-              />
-            </div>
-          )}
+      {/* Device Selection — right after Enable toggle */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label>STT Compute Device</Label>
+          <DeviceToggle device={stt.device} onChange={handleDeviceChange} />
         </div>
-      )}
-      {gpu && !gpu.available && gpu.name === undefined && (
-        <div className="rounded-lg bg-secondary/50 border border-border p-3">
-          <p className="text-xs text-muted-foreground">
-            GPU info loading... Models will use the selected compute device.
-          </p>
-        </div>
-      )}
-      {gpu && !gpu.available && gpu.name !== undefined && (
-        <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 p-3">
-          <p className="text-xs text-yellow-400">
-            No NVIDIA GPU detected. Models will run on CPU (slower but works everywhere).
-          </p>
-        </div>
-      )}
+        <p className="text-xs text-muted-foreground">
+          Controls whether Whisper runs on CPU or GPU.
+        </p>
+      </div>
 
       {/* STT Model Selection */}
       <div className="space-y-2">
@@ -970,20 +1170,13 @@ function ModelsSettings() {
               isLoaded={isSTTLoaded(model.id)}
               downloadProgress={getDownloadProgress(model.id)}
               onClick={() => handleSelectSTTModel(model.id)}
+              onUnload={() => {
+                console.log('[Settings] Unloading STT model', model.id)
+                unloadSTT()
+              }}
             />
           ))}
         </div>
-      </div>
-
-      {/* Device Selection */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <Label>STT Compute Device</Label>
-          <DeviceToggle device={stt.device} onChange={handleDeviceChange} />
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Controls whether Whisper runs on CPU or GPU.
-        </p>
       </div>
 
       {/* Info Box */}
@@ -998,6 +1191,18 @@ function ModelsSettings() {
           <li><strong>Large v3:</strong> Best accuracy, needs GPU for real-time</li>
         </ul>
       </div>
+
+      <div className="border-t border-border" />
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" onClick={() => {
+          console.log('[Settings] STT reset defaults')
+          updateSTT({ model: 'whisper-base', language: 'en', device: 'cpu' })
+          updateSettings({ stt: { model: 'whisper-base', language: 'en', device: 'cpu' } })
+        }}>
+          <RotateCcw className="w-4 h-4 mr-2" />
+          Reset to Defaults
+        </Button>
+      </div>
     </div>
   )
 }
@@ -1011,18 +1216,33 @@ const TRANSLATION_PROVIDERS = [
 
 function TranslationSettings() {
   const { translation, updateTranslation, updatePairLanguage } = useSettingsStore()
-  const { loadModel, updateSettings } = useBackend()
+  const { loadModel, updateSettings, lastMessage, unloadTranslation } = useBackend()
   const modelStore = useModelStore()
   const [loadingModel, setLoadingModel] = useState(false)
+  const [modelLoaded, setModelLoaded] = useState(false)
 
   // Track translation model loading
   useEffect(() => {
     const translationModels = modelStore.models.filter(m => m.category === 'translation')
     const loading = translationModels.some(m => m.status === 'loading')
     const loaded = translationModels.some(m => m.status === 'loaded')
-    if (loading) setLoadingModel(true)
-    else if (loaded) setLoadingModel(false)
+    if (loading) { setLoadingModel(true); setModelLoaded(false) }
+    else if (loaded) { setLoadingModel(false); setModelLoaded(true) }
   }, [modelStore.models])
+
+  // Handle translation_unloaded message
+  useEffect(() => {
+    if (lastMessage?.type === 'translation_unloaded') {
+      const p = lastMessage.payload as { success?: boolean }
+      console.log('[TranslationSettings] Translation model unloaded, success:', p.success)
+      if (p.success) {
+        setLoadingModel(false)
+        setModelLoaded(false)
+        const translationModels = modelStore.models.filter(m => m.category === 'translation')
+        translationModels.forEach(m => modelStore.updateModelStatus(m.id, 'not_installed'))
+      }
+    }
+  }, [lastMessage, modelStore])
 
   const activePair = translation.languagePairs[translation.activePairIndex] || translation.languagePairs[0]
   const isCloud = translation.provider !== 'local'
@@ -1077,6 +1297,24 @@ function TranslationSettings() {
           checked={translation.enabled}
           onCheckedChange={handleToggleTranslation}
         />
+      </div>
+
+      {/* Translation Compute Device — shown for all providers (local uses it directly, cloud as fallback) */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label>Translation Compute Device</Label>
+          <DeviceToggle
+            device={translation.device}
+            onChange={(d) => {
+              console.log('[Settings] Translation device change', d)
+              updateTranslation({ device: d })
+              updateSettings({ translation: { device: d } })
+            }}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Controls whether NLLB translation runs on CPU or GPU (applies when using Local provider).
+        </p>
       </div>
 
       {/* Translation Provider */}
@@ -1134,33 +1372,77 @@ function TranslationSettings() {
           <div className="space-y-2">
             {TRANSLATION_MODELS.map((model) => {
               const isActive = translation.model === model.value
+              const isThisLoaded = isActive && modelLoaded && !loadingModel
               return (
                 <button
                   key={model.value}
                   onClick={() => {
-                    console.log('[Settings] Translation model card click', model.value)
-                    handleModelChange(model.value)
+                    if (!isThisLoaded) {
+                      console.log('[Settings] Translation model card click', model.value)
+                      handleModelChange(model.value)
+                    }
                   }}
                   disabled={!translation.enabled || loadingModel}
-                  className={`w-full text-left p-3 rounded-lg border transition-all ${
-                    isActive
-                      ? 'bg-primary/10 border-primary'
+                  className={`w-full text-left p-3 rounded-lg border transition-all relative overflow-hidden ${
+                    isActive && isThisLoaded
+                      ? 'border-white/70'
+                      : isActive
+                      ? 'border-primary/50'
                       : 'bg-secondary border-border hover:border-primary/30'
                   } ${(!translation.enabled || loadingModel) ? 'opacity-70' : ''}`}
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between relative z-10">
                     <span className="font-medium text-sm">{model.label}</span>
-                    {isActive && !loadingModel && (
-                      <span className="flex items-center gap-1 text-xs text-green-500">
-                        <Check className="w-3 h-3" /> Active
-                      </span>
-                    )}
-                    {isActive && loadingModel && (
-                      <span className="flex items-center gap-1 text-xs text-primary">
-                        <Loader2 className="w-3 h-3 animate-spin" /> Loading...
-                      </span>
-                    )}
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isThisLoaded && (
+                        <>
+                          <span className="flex items-center gap-1 text-xs text-green-500">
+                            <Check className="w-3 h-3" /> Active
+                          </span>
+                          <span
+                            role="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              console.log('[Settings] Unload translation model', model.value)
+                              unloadTranslation()
+                            }}
+                            className="px-2 py-0.5 rounded text-[10px] font-medium bg-secondary hover:bg-destructive/20 hover:text-destructive transition-colors border border-border cursor-pointer"
+                            title="Unload model from memory"
+                          >
+                            Unload
+                          </span>
+                        </>
+                      )}
+                      {isActive && !isThisLoaded && !loadingModel && (() => {
+                        const translationModels = modelStore.models.filter(m => m.category === 'translation')
+                        const hasError = translationModels.some(m => m.status === 'error')
+                        return hasError ? (
+                          <span className="flex items-center gap-1 text-xs text-red-500">
+                            <AlertCircle className="w-3 h-3" /> Error
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1 text-xs text-green-500">
+                            <Check className="w-3 h-3" /> Active
+                          </span>
+                        )
+                      })()}
+                      {isActive && loadingModel && (
+                        <span className="flex items-center gap-1 text-xs text-primary">
+                          Loading...
+                        </span>
+                      )}
+                      <WifiOff className="w-4 h-4 text-muted-foreground" />
+                    </div>
                   </div>
+                  {isActive && loadingModel && (
+                    <div
+                      className="absolute left-0 top-0 bottom-0 rounded-lg"
+                      style={{
+                        background: 'rgba(40, 120, 60, 0.15)',
+                        animation: 'modelLoadFill 60s ease-out forwards',
+                      }}
+                    />
+                  )}
                 </button>
               )
             })}
@@ -1174,25 +1456,7 @@ function TranslationSettings() {
         </div>
       )}
 
-      {/* Translation Compute Device */}
-      {!isCloud && (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label>Translation Compute Device</Label>
-            <DeviceToggle
-              device={translation.device}
-              onChange={(d) => {
-                console.log('[Settings] Translation device change', d)
-                updateTranslation({ device: d })
-                updateSettings({ translation: { device: d } })
-              }}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Controls whether NLLB runs on CPU or GPU.
-          </p>
-        </div>
-      )}
+      {/* Translation Compute Device is now at the top of the page */}
 
       {/* Info Box */}
       <div className="rounded-lg bg-secondary p-4 text-sm">
@@ -1229,6 +1493,18 @@ function TranslationSettings() {
             </ul>
           </>
         )}
+      </div>
+
+      <div className="border-t border-border" />
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" onClick={() => {
+          console.log('[Settings] Translation reset defaults')
+          updateTranslation({ model: 'nllb-200-distilled-600M', provider: 'free', device: 'cpu' })
+          updateSettings({ translation: { model: 'nllb-200-distilled-600M', provider: 'free', device: 'cpu' } })
+        }}>
+          <RotateCcw className="w-4 h-4 mr-2" />
+          Reset to Defaults
+        </Button>
       </div>
     </div>
   )
@@ -1357,9 +1633,14 @@ function TTSSettings() {
         setVoicevoxFetchingVoices(false)
       }
     } else if (lastMessage.type === 'voicevox_voices') {
-      const result = lastMessage.payload as { voices?: TTSVoice[] }
+      const result = lastMessage.payload as { voices?: TTSVoice[]; engine_running?: boolean }
       if (result.voices && result.voices.length > 0) {
         setVoices(result.voices)
+      }
+      // If backend reports engine not running, update our state to stop further fetches
+      if (result.engine_running === false) {
+        console.log('[TTS] VOICEVOX engine not running, stopping voice fetch')
+        setVoicevoxEngineRunning(false)
       }
       setVoicevoxFetchingVoices(false)
     } else if (lastMessage.type === 'voicevox_setup_status') {
@@ -1387,7 +1668,7 @@ function TTSSettings() {
         })
       }
     } else if (lastMessage.type === 'voicevox_engine_status') {
-      const p = lastMessage.payload as { running?: boolean }
+      const p = lastMessage.payload as { running?: boolean; error?: string }
       const running = p.running ?? false
       setVoicevoxEngineRunning(running)
       if (running) {
@@ -1395,6 +1676,10 @@ function TTSSettings() {
         fetchVoicevoxVoices()
       } else {
         setVoicevoxFetchingVoices(false)
+        setVoicevoxConnected(false)
+        if (p.error) {
+          console.log('[TTS] VOICEVOX engine error:', p.error)
+        }
       }
     }
   }, [lastMessage, sendMessage, fetchVoicevoxVoices])
@@ -1405,6 +1690,24 @@ function TTSSettings() {
     const voicePerEngine = { ...(tts.voicePerEngine ?? {}), [tts.engine]: tts.voice }
     updateTTS({ engine: engineId as typeof tts.engine, voicePerEngine })
     updateSettings({ tts: { engine: engineId } })
+
+    // VOICEVOX auto-install and start
+    if (engineId === 'voicevox') {
+      if (!voicevoxInstalled) {
+        console.log('[Settings] VOICEVOX not installed, auto-downloading (directml)')
+        sendMessage({ type: 'voicevox_download_engine', payload: { build_type: tts.voicevoxBuildType || 'directml' } })
+      } else if (!voicevoxEngineRunning) {
+        console.log('[Settings] VOICEVOX installed but not running, auto-starting')
+        setVoicevoxSetupProgress({ stage: 'starting', progress: 0, detail: 'Starting VOICEVOX Engine...' })
+        sendMessage({ type: 'voicevox_start_engine' })
+      }
+    }
+
+    // Stop VOICEVOX when switching away
+    if (tts.engine === 'voicevox' && engineId !== 'voicevox' && voicevoxEngineRunning) {
+      console.log('[Settings] Switching away from VOICEVOX, stopping engine')
+      sendMessage({ type: 'voicevox_stop_engine' })
+    }
   }
 
   const handleVoiceChange = (voiceId: string) => {
@@ -1496,18 +1799,35 @@ function TTSSettings() {
         />
       </div>
 
+      {/* TTS Compute Device */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label>TTS Compute Device</Label>
+          <DeviceToggle
+            device={tts.device}
+            onChange={(d) => {
+              console.log('[Settings] TTS device change', d)
+              updateTTS({ device: d })
+              updateSettings({ tts: { device: d } })
+            }}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Controls whether TTS runs on CPU or GPU.
+        </p>
+      </div>
+
       {/* Engine Selection Cards */}
       <div className="space-y-2">
         <Label>TTS Engine</Label>
         <div className="space-y-2">
           {TTS_ENGINES.map((engine) => {
             const isSelected = tts.engine === engine.id
-            const isVoicevoxUnavailable = engine.id === 'voicevox' && !voicevoxInstalled
-            const isDisabled = !tts.enabled || isVoicevoxUnavailable
+            const isDisabled = !tts.enabled
             return (
               <button
                 key={engine.id}
-                onClick={() => !isVoicevoxUnavailable && handleEngineChange(engine.id)}
+                onClick={() => handleEngineChange(engine.id)}
                 disabled={isDisabled}
                 className={`w-full text-left p-3 rounded-lg border transition-all ${
                   isSelected
@@ -1526,13 +1846,16 @@ function TTSSettings() {
                       }`}>
                         {engine.badge}
                       </span>
-                      {isSelected && !isVoicevoxUnavailable && (
+                      {isSelected && (
                         <span className="flex items-center gap-1 text-xs text-green-500">
                           <Check className="w-3 h-3" /> Active
                         </span>
                       )}
-                      {isVoicevoxUnavailable && (
-                        <span className="text-xs text-yellow-500/70">Install in Features settings</span>
+                      {engine.id === 'voicevox' && !voicevoxInstalled && !isSelected && (
+                        <span className="text-xs text-muted-foreground">Click to auto-install</span>
+                      )}
+                      {engine.id === 'voicevox' && voicevoxInstalled && voicevoxEngineRunning && (
+                        <span className="text-xs text-green-500/70">Running</span>
                       )}
                     </div>
                     <p className="text-xs text-muted-foreground mt-0.5">{engine.description}</p>
@@ -1625,7 +1948,7 @@ function TTSSettings() {
           {/* Engine status indicator */}
           <div className="pt-2 border-t border-border/50">
             <p className="text-xs text-muted-foreground">
-              Install or manage the VOICEVOX engine from the <strong>Install Features</strong> page.
+              VOICEVOX auto-installs when selected as TTS engine.
               {voicevoxEngineRunning && (
                 <span className="text-green-400 ml-1">Engine is running.</span>
               )}
@@ -1817,6 +2140,18 @@ function TTSSettings() {
           <li><strong>SAPI:</strong> Uses built-in Windows voices, no download needed</li>
           <li><strong>VOICEVOX:</strong> High-quality Japanese anime voices, needs separate engine</li>
         </ul>
+      </div>
+
+      <div className="border-t border-border" />
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" onClick={() => {
+          console.log('[Settings] TTS reset defaults')
+          updateTTS({ engine: 'piper', voice: 'en_US-amy-medium', speed: 1.0, pitch: 1.0, volume: 0.8, device: 'cpu' })
+          updateSettings({ tts: { engine: 'piper', voice: 'en_US-amy-medium', speed: 1.0, pitch: 1.0, volume: 0.8, device: 'cpu' } })
+        }}>
+          <RotateCcw className="w-4 h-4 mr-2" />
+          Reset to Defaults
+        </Button>
       </div>
     </div>
   )
@@ -2356,6 +2691,18 @@ function AISettings() {
           <li><strong>Google:</strong> Gemini models, free tier available</li>
         </ul>
       </div>
+
+      <div className="border-t border-border" />
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" onClick={() => {
+          console.log('[Settings] AI reset defaults')
+          updateAI({ provider: 'free', keyword: 'Jarvis', maxResponseLength: 140, speakResponses: true, showInOverlay: true, emojiMode: false, device: 'cpu', gpuLayers: 0 })
+          updateSettings({ ai: { provider: 'free', keyword: 'Jarvis', max_response_length: 140, speak_responses: true, show_in_overlay: true, emoji_mode: false, device: 'cpu' } })
+        }}>
+          <RotateCcw className="w-4 h-4 mr-2" />
+          Reset to Defaults
+        </Button>
+      </div>
     </div>
   )
 }
@@ -2427,7 +2774,7 @@ function OverlaySettings() {
       const dy = -(e.clientY - interaction.startMouseY) * pxToV
 
       if (interaction.type === 'drag') {
-        const newX = Math.max(-1.0, Math.min(1.0, interaction.startX + dx))
+        const newX = Math.max(-1.5, Math.min(1.5, interaction.startX + dx))
         const newY = Math.max(-1.0, Math.min(1.0, interaction.startY + dy))
         const canvasXPct = (e.clientX - rect.left) / rect.width
         const canvasYPct = (e.clientY - rect.top) / rect.height
@@ -2576,6 +2923,16 @@ function OverlaySettings() {
     }
     updateVROverlay(defaults)
     updateSettings({ vrOverlay: defaults })
+    // Also reset OCR settings
+    const ocrDefaults = {
+      device: 'cpu' as const, mode: 'manual' as const, interval: 3,
+      controllerBindingEnabled: false, captureBinding: ['right_grip'], toggleBinding: ['left_grip', 'left_a'],
+      confidence: 0.3,
+      captureRegion: { x: 0, y: -0.1, width: 0.5, height: 0.15, distance: 1.5 },
+      ocrButton: { x: 0.25, y: -0.3, width: 0.06, distance: 1.5, tracking: 'none' as const },
+    }
+    updateOCR(ocrDefaults)
+    updateSettings({ ocr: ocrDefaults })
   }
 
   const steamVRInstalled = overlayStatus?.steamvr_installed ?? false
@@ -2656,7 +3013,13 @@ function OverlaySettings() {
             <strong>VR Overlay Active</strong> — Running in SteamVR.
           </p>
         </div>
-      ) : null}
+      ) : (
+        <div className="p-3 bg-orange-500/10 border border-orange-500/20 rounded-lg">
+          <p className="text-xs text-orange-400">
+            <strong>SteamVR detected but overlay not connected.</strong> Make sure SteamVR is running, then toggle the overlay off and on.
+          </p>
+        </div>
+      )}
 
       {/* Enable */}
       <div className="flex items-center justify-between p-3 bg-secondary/30 rounded-lg">
@@ -2766,7 +3129,7 @@ function OverlaySettings() {
             </div>
           )}
 
-          {/* OCR Toggle Button (cyan) */}
+          {/* OCR Toggle Button (cyan) — only visible when VRT is enabled */}
           {ocr.enabled && (() => {
             const onHand = ocr.ocrButton.tracking !== 'none'
             return (
@@ -2800,19 +3163,18 @@ function OverlaySettings() {
               <span className="text-xs font-medium">Notification</span>
             </div>
             <Switch checked={vrOverlay.notificationEnabled}
-              onCheckedChange={(v) => handleUpdate({ notificationEnabled: v })} />
+              onCheckedChange={(v) => { console.log('[Settings] Notification overlay toggle', v); handleUpdate({ notificationEnabled: v }) }} />
           </div>
-          {vrOverlay.notificationEnabled && (
-            <div className="p-2.5 space-y-2.5 border-t border-border">
+            <div className={`p-2.5 space-y-2.5 border-t border-border ${!vrOverlay.notificationEnabled ? 'opacity-50 pointer-events-none' : ''}`}>
               {renderTrackingToggle(vrOverlay.notificationTracking, 'notificationTracking')}
               {renderSlider('Depth from you (meters)', vrOverlay.notificationDistance, 0.05, 5, 0.05, v => `${v.toFixed(2)}m`, 'notificationDistance')}
               {renderSlider('Font Size (in VR)', vrOverlay.notificationFontSize, 12, 64, 2, v => `${v}px`, 'notificationFontSize')}
               {renderColorPicker('Font Color', vrOverlay.notificationFontColor, 'notificationFontColor')}
               {renderColorPicker('Background', vrOverlay.notificationBgColor, 'notificationBgColor')}
               {renderSlider('BG Opacity', vrOverlay.notificationBgOpacity, 0, 1, 0.05, v => `${Math.round(v * 100)}%`, 'notificationBgOpacity')}
-              {renderSlider('Auto-hide', vrOverlay.notificationAutoHide, 0, 30, 1, v => v === 0 ? 'Never' : `${v}s`, 'notificationAutoHide')}
-              {renderSlider('Fade In', vrOverlay.notificationFadeIn, 0, 2, 0.1, v => v === 0 ? 'Instant' : `${v.toFixed(1)}s`, 'notificationFadeIn')}
-              {renderSlider('Fade Out', vrOverlay.notificationFadeOut, 0, 2, 0.1, v => v === 0 ? 'Instant' : `${v.toFixed(1)}s`, 'notificationFadeOut')}
+              {renderSlider('Auto-hide', vrOverlay.notificationAutoHide, 0, 30, 1, v => v === 0 ? 'Off' : `${v}s`, 'notificationAutoHide')}
+              {renderSlider('Fade In', vrOverlay.notificationFadeIn, 0, 2, 0.1, v => v === 0 ? 'Off' : `${v.toFixed(1)}s`, 'notificationFadeIn')}
+              {renderSlider('Fade Out', vrOverlay.notificationFadeOut, 0, 2, 0.1, v => v === 0 ? 'Off' : `${v.toFixed(1)}s`, 'notificationFadeOut')}
               <div className="flex items-center justify-between">
                 <Label className="text-xs">Adaptive Height</Label>
                 <Switch checked={vrOverlay.notificationAdaptiveHeight}
@@ -2825,7 +3187,6 @@ function OverlaySettings() {
                 fontSize: `${Math.round(10 + (vrOverlay.notificationFontSize - 12) * 0.3)}px`,
               }}>Hello! Preview text.</div>
             </div>
-          )}
         </div>
 
         {/* Message Log */}
@@ -2836,16 +3197,18 @@ function OverlaySettings() {
               <span className="text-xs font-medium">Message Log</span>
             </div>
             <Switch checked={vrOverlay.messageLogEnabled}
-              onCheckedChange={(v) => handleUpdate({ messageLogEnabled: v })} />
+              onCheckedChange={(v) => { console.log('[Settings] Message Log overlay toggle', v); handleUpdate({ messageLogEnabled: v }) }} />
           </div>
-          {vrOverlay.messageLogEnabled && (
-            <div className="p-2.5 space-y-2.5 border-t border-border">
+            <div className={`p-2.5 space-y-2.5 border-t border-border ${!vrOverlay.messageLogEnabled ? 'opacity-50 pointer-events-none' : ''}`}>
               {renderTrackingToggle(vrOverlay.messageLogTracking, 'messageLogTracking')}
               {renderSlider('Depth from you (meters)', vrOverlay.messageLogDistance, 0.05, 5, 0.05, v => `${v.toFixed(2)}m`, 'messageLogDistance')}
               {renderSlider('Font Size (in VR)', vrOverlay.messageLogFontSize, 12, 48, 2, v => `${v}px`, 'messageLogFontSize')}
               {renderColorPicker('Font Color', vrOverlay.messageLogFontColor, 'messageLogFontColor')}
               {renderColorPicker('Background', vrOverlay.messageLogBgColor, 'messageLogBgColor')}
               {renderSlider('BG Opacity', vrOverlay.messageLogBgOpacity, 0, 1, 0.05, v => `${Math.round(v * 100)}%`, 'messageLogBgOpacity')}
+              {renderSlider('Auto-hide', vrOverlay.messageLogAutoHide, 0, 30, 1, v => v === 0 ? 'Off' : `${v}s`, 'messageLogAutoHide')}
+              {renderSlider('Fade In', vrOverlay.messageLogFadeIn, 0, 2, 0.1, v => v === 0 ? 'Off' : `${v.toFixed(1)}s`, 'messageLogFadeIn')}
+              {renderSlider('Fade Out', vrOverlay.messageLogFadeOut, 0, 2, 0.1, v => v === 0 ? 'Off' : `${v.toFixed(1)}s`, 'messageLogFadeOut')}
               {renderSlider('Max Messages', vrOverlay.messageLogMax, 5, 50, 5, v => `${v}`, 'messageLogMax')}
               {/* Live Preview */}
               <div className="rounded p-2 space-y-0.5 transition-all overflow-hidden" style={{
@@ -2858,7 +3221,6 @@ function OverlaySettings() {
                 <div style={{ color: '#ffb464' }}>[AI] How can I help?</div>
               </div>
             </div>
-          )}
         </div>
 
         {/* VR Translation */}
@@ -2875,8 +3237,30 @@ function OverlaySettings() {
                 sendMessage({ type: 'update_settings', payload: { ocr: { enabled: v } } })
               }} />
           </div>
-          {ocr.enabled && (
-            <div className="p-2.5 space-y-2.5 border-t border-border">
+            <div className={`p-2.5 space-y-2.5 border-t border-border ${!ocr.enabled ? 'opacity-50 pointer-events-none' : ''}`}>
+              {/* Attach To */}
+              <div className="space-y-1">
+                <Label className="text-xs">Attach To</Label>
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { value: 'none', label: 'Head (HMD)' },
+                    { value: 'left_hand', label: 'Left Hand' },
+                    { value: 'right_hand', label: 'Right Hand' },
+                  ].map((opt) => (
+                    <button key={opt.value}
+                      onClick={() => {
+                        console.log('[Settings] VRT button tracking', opt.value)
+                        updateOCR({ ocrButton: { ...ocr.ocrButton, tracking: opt.value } })
+                        sendMessage({ type: 'update_settings', payload: { ocr: { ocrButton: { ...ocr.ocrButton, tracking: opt.value } } } })
+                      }}
+                      className={`p-1 text-[10px] rounded border transition-colors ${
+                        ocr.ocrButton.tracking === opt.value
+                          ? 'border-primary bg-primary/20 text-primary'
+                          : 'border-border bg-secondary/20 text-muted-foreground hover:bg-secondary/40'
+                      }`}>{opt.label}</button>
+                  ))}
+                </div>
+              </div>
               {/* Device & Mode */}
               <div className="flex items-center justify-between">
                 <Label className="text-xs">Device</Label>
@@ -2926,7 +3310,7 @@ function OverlaySettings() {
               <div className="flex items-center justify-between">
                 <Label className="text-xs">Interval</Label>
                 <div className="flex items-center gap-1">
-                  {[1, 2, 3, 5, 10].map(s => (
+                  {[2, 3, 5, 7, 10].map(s => (
                     <button
                       key={s}
                       disabled={ocr.mode !== 'automatic'}
@@ -2966,11 +3350,20 @@ function OverlaySettings() {
               {/* Manual capture button — always visible, greyed when auto */}
               <button
                 disabled={ocr.mode !== 'manual'}
-                onClick={() => {
+                onClick={(e) => {
                   console.log('[Settings] VRT manual capture')
                   sendMessage({ type: 'ocr_capture' })
+                  // Visual feedback — brief highlight
+                  const btn = e.currentTarget
+                  btn.classList.add('!bg-primary', '!text-primary-foreground')
+                  btn.textContent = 'Capturing...'
+                  setTimeout(() => {
+                    btn.classList.remove('!bg-primary', '!text-primary-foreground')
+                    btn.textContent = ''
+                    btn.innerHTML = '<svg class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8h8"/><path d="M7 12h10"/><path d="M7 16h6"/></svg> Capture Now'
+                  }, 1000)
                 }}
-                className={`w-full flex items-center justify-center gap-1.5 p-1.5 rounded text-xs font-medium transition-colors border border-border ${
+                className={`w-full flex items-center justify-center gap-1.5 p-1.5 rounded text-xs font-medium transition-all border border-border ${
                   ocr.mode !== 'manual' ? 'opacity-40 cursor-not-allowed bg-secondary text-muted-foreground' : 'bg-secondary hover:bg-secondary/80'
                 }`}
               >
@@ -3095,7 +3488,6 @@ function OverlaySettings() {
                   </div>
               </div>
             </div>
-          )}
         </div>
       </div>
 
@@ -3110,16 +3502,16 @@ function OverlaySettings() {
         </div>
         <div className="grid grid-cols-2 gap-2">
           {[
-            { key: 'showOriginalText', label: 'Original text', Icon: Mic },
-            { key: 'showTranslatedText', label: 'Translated text', Icon: Languages },
-            { key: 'showAIResponses', label: 'AI responses', Icon: Bot },
-            { key: 'showListenText', label: 'Listen text', Icon: Headphones },
-            { key: 'showOCRText', label: 'VR Translation', Icon: ScanText },
-          ].map(({ key, label, Icon }) => (
+            { key: 'showOriginalText', label: 'Original text', Icon: Mic, dest: 'Notification' },
+            { key: 'showTranslatedText', label: 'Translated text', Icon: Languages, dest: 'Notification' },
+            { key: 'showAIResponses', label: 'AI responses', Icon: Bot, dest: 'Notification' },
+            { key: 'showListenText', label: 'Listen text', Icon: Headphones, dest: 'Message Log' },
+          ].map(({ key, label, Icon, dest }) => (
             <div key={key} className="flex items-center justify-between p-2 bg-secondary/20 rounded">
               <div className="flex items-center gap-1.5">
                 <Icon className="w-3.5 h-3.5 text-muted-foreground" />
                 <span className="text-xs">{label}</span>
+                <span className="text-[10px] text-muted-foreground">{'\u2192'} {dest}</span>
               </div>
               <Switch checked={vrOverlay[key as keyof typeof vrOverlay] as boolean}
                 onCheckedChange={(show) => handleUpdate({ [key]: show })} />
@@ -3230,6 +3622,12 @@ function AudioSettings() {
     console.log('[Settings] Noise suppression toggle', enabled)
     updateAudio({ enableNoiseSuppression: enabled })
     updateSettings({ audio: { enableNoiseSuppression: enabled } })
+  }
+
+  const handleNoiseGateThresholdChange = (value: number) => {
+    console.log('[Settings] Noise gate threshold change', value)
+    updateAudio({ noiseGateThreshold: value })
+    updateSettings({ audio: { noise_gate_threshold: value } })
   }
 
   const handleVADToggle = (enabled: boolean) => {
@@ -3381,6 +3779,30 @@ function AudioSettings() {
               onCheckedChange={handleNoiseSuppressionToggle}
             />
           </div>
+
+          {/* Noise Gate Threshold Slider */}
+          {audio.enableNoiseSuppression && (
+            <div className="space-y-2 p-3 bg-secondary/30 rounded-lg">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium">Noise Gate</p>
+                <span className="text-sm text-muted-foreground">{(audio.noiseGateThreshold ?? 0.005).toFixed(3)}</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-6">Off</span>
+                <input
+                  type="range"
+                  min="0.0"
+                  max="0.05"
+                  step="0.001"
+                  value={audio.noiseGateThreshold ?? 0.005}
+                  onChange={(e) => handleNoiseGateThresholdChange(parseFloat(e.target.value))}
+                  className="flex-1"
+                />
+                <span className="text-xs text-muted-foreground w-6">Max</span>
+              </div>
+              <p className="text-xs text-muted-foreground">Higher = filters more background noise but may cut quiet speech</p>
+            </div>
+          )}
 
           {/* VAD Settings */}
           <div className="space-y-3 p-3 bg-secondary/30 rounded-lg">
@@ -3565,6 +3987,17 @@ function AudioSettings() {
         </div>
       </div>
 
+      <div className="border-t border-border" />
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" onClick={() => {
+          console.log('[Settings] Audio reset defaults')
+          updateAudio({ enableNoiseSuppression: true, noiseGateThreshold: 0.005, enableVAD: true, vadSensitivity: 0.5 })
+          updateSettings({ audio: { enable_noise_suppression: true, noise_gate_threshold: 0.005, enable_vad: true, vad_sensitivity: 0.5 } })
+        }}>
+          <RotateCcw className="w-4 h-4 mr-2" />
+          Reset to Defaults
+        </Button>
+      </div>
     </div>
   )
 }
@@ -3780,6 +4213,25 @@ function VRChatSettings() {
             Maximum of 5 output destinations reached.
           </p>
         )}
+      </div>
+
+      <div className="border-t border-border" />
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" onClick={() => {
+          console.log('[Settings] OSC reset defaults')
+          const defaultProfile = outputProfiles.find(p => p.id === 'default')
+          if (defaultProfile) {
+            updateOutputProfile('default', {
+              oscEnabled: true, oscIP: '127.0.0.1', oscPort: 9000,
+              sendOriginalText: true, sendTranslatedText: true, sendAiResponses: true, sendListenText: true,
+              sendTtsAudio: true, sendRvcAudio: true,
+            })
+            updateSettings({ output_profiles: [{ id: 'default', osc_enabled: true, osc_ip: '127.0.0.1', osc_port: 9000, send_original_text: true, send_translated_text: true, send_ai_responses: true, send_listen_text: true }] })
+          }
+        }}>
+          <RotateCcw className="w-4 h-4 mr-2" />
+          Reset to Defaults
+        </Button>
       </div>
     </div>
   )
@@ -4000,20 +4452,10 @@ function CredentialsSettings() {
       <div>
         <h4 className="text-sm font-medium text-muted-foreground mb-3 uppercase tracking-wider">AI Providers</h4>
         <div className="space-y-4">
-          {aiProviders.map(({ key, name, url }) => (
-            <div key={key} className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label>{name} API Key</Label>
-                <a
-                  href={url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline"
-                >
-                  Get API Key
-                </a>
-              </div>
-              <div className="flex gap-2">
+          {aiProviders.map(({ key, name }) => (
+            <div key={key} className="space-y-1.5">
+              <Label>{name} API Key</Label>
+              <div className="flex gap-2 items-center">
                 <input
                   type={showKeys[key] ? 'text' : 'password'}
                   value={credentials[key]}
@@ -4024,7 +4466,7 @@ function CredentialsSettings() {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="w-16"
+                  className="w-16 shrink-0"
                   onClick={() => setShowKeys({ ...showKeys, [key]: !showKeys[key] })}
                 >
                   {showKeys[key] ? 'Hide' : 'Show'}
@@ -4061,20 +4503,10 @@ function CredentialsSettings() {
       <div>
         <h4 className="text-sm font-medium text-muted-foreground mb-3 uppercase tracking-wider">Translation Providers</h4>
         <div className="space-y-4">
-          {translationProviders.map(({ key, name, url }) => (
-            <div key={key} className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label>{name} API Key</Label>
-                <a
-                  href={url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline"
-                >
-                  Get API Key
-                </a>
-              </div>
-              <div className="flex gap-2">
+          {translationProviders.map(({ key, name }) => (
+            <div key={key} className="space-y-1.5">
+              <Label>{name} API Key</Label>
+              <div className="flex gap-2 items-center">
                 <input
                   type={showKeys[key] ? 'text' : 'password'}
                   value={credentials[key]}
@@ -4085,7 +4517,7 @@ function CredentialsSettings() {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="w-16"
+                  className="w-16 shrink-0"
                   onClick={() => setShowKeys({ ...showKeys, [key]: !showKeys[key] })}
                 >
                   {showKeys[key] ? 'Hide' : 'Show'}
@@ -4151,10 +4583,17 @@ function VoiceConversionSettings() {
 
   // Request model list, status, and available devices on mount
   useEffect(() => {
+    console.log('[VoiceConversionSettings] Mounted — globalRvcLoaded:', globalRvcLoaded, 'modelPath:', settings.rvc.modelPath, 'isModelLoaded:', isModelLoaded)
     sendMessage({ type: 'rvc_scan_models' })
     sendMessage({ type: 'rvc_get_status' })
     sendMessage({ type: 'rvc_get_available_devices' })
-  }, [sendMessage])
+    // If model path is set but not loaded, it might be loading from auto-load — show loading state
+    if (settings.rvc.modelPath && !globalRvcLoaded) {
+      console.log('[VoiceConversionSettings] Model path set but not loaded — assuming loading in progress')
+      setIsLoading(true)
+      setLoadingStage('Loading voice model...')
+    }
+  }, [sendMessage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle backend messages for RVC
   useEffect(() => {
@@ -4219,7 +4658,15 @@ function VoiceConversionSettings() {
         const payload = lastMessage.payload as {
           enabled?: boolean; loaded?: boolean; model_name?: string | null; memory_mb?: number; device?: string
         }
-        if (payload.loaded !== undefined) setIsModelLoaded(payload.loaded)
+        console.log('[VoiceConversionSettings] rvc_status received:', { loaded: payload.loaded, model_name: payload.model_name, memory_mb: payload.memory_mb, device: payload.device })
+        if (payload.loaded !== undefined) {
+          setIsModelLoaded(payload.loaded)
+          // If status says not loaded and we assumed loading, clear loading state
+          if (!payload.loaded && isLoading && !loadingStage.includes('Downloading')) {
+            console.log('[VoiceConversionSettings] rvc_status: not loaded, clearing assumed loading state')
+            setIsLoading(false)
+          }
+        }
         if (payload.model_name) setModelName(payload.model_name)
         if (payload.memory_mb) setMemoryUsageMb(payload.memory_mb)
         // Log backend device for diagnostics (don't override user's saved device —
@@ -4361,14 +4808,25 @@ function VoiceConversionSettings() {
   const handleMicRvcToggle = (checked: boolean) => {
     console.log('[Settings] RVC mic toggle', checked)
     settings.updateRVC({ micRvcEnabled: checked })
-    useChatStore.getState().setMicRvcActive(checked)  // Optimistic UI update
     if (checked) {
+      useChatStore.getState().setMicRvcActive(true)  // Optimistic UI update for start
       sendMessage({
         type: 'rvc_mic_start',
         payload: { output_device_id: settings.rvc.micRvcOutputDeviceId }
       })
     } else {
+      // Don't optimistically set to false — wait for backend confirmation
+      console.log('[Settings] Sending rvc_mic_stop')
       sendMessage({ type: 'rvc_mic_stop' })
+      // 5s timeout: if backend doesn't confirm stop, force-reset UI
+      const stopTimeout = setTimeout(() => {
+        if (useChatStore.getState().isMicRvcActive) {
+          console.warn('[Settings] Mic RVC stop timeout (5s) — force-resetting UI state')
+          useChatStore.getState().setMicRvcActive(false)
+          useNotificationStore.getState().addToast('Mic RVC stop timed out — UI reset. Backend may still be processing.', 'warning')
+        }
+      }, 5000)
+      ;(window as Record<string, unknown>).__micRvcStopTimeout = stopTimeout
     }
   }
 
@@ -4381,48 +4839,70 @@ function VoiceConversionSettings() {
     setTimeout(() => sendMessage({ type: 'restart_app' }), 800)
   }
 
+  const { updateRVCMicParams, updateRVCTtsParams, updateRVCMicPerformance } = useSettingsStore()
+  const micParams = settings.rvc.micParams
+  const ttsParams = settings.rvc.ttsParams
+  const micPerf = settings.rvc.micPerformance || { blockTime: 0.5, contextTime: 1.0, silenceThreshold: 0.003, crossfadeMs: 40 }
+
+  const handlePerfChange = (param: string, value: number) => {
+    console.log('[Settings] RVC perf change', param, value)
+    updateRVCMicPerformance({ [param]: value } as any)
+    const paramMap: Record<string, string> = {
+      blockTime: 'block_time', contextTime: 'context_time',
+      silenceThreshold: 'silence_threshold', crossfadeMs: 'crossfade_ms',
+    }
+    sendMessage({ type: 'rvc_mic_set_performance', payload: { [paramMap[param] || param]: value } })
+  }
+
+  const handleMicParamChange = (param: string, value: number) => {
+    console.log('[Settings] RVC mic param change', param, value)
+    updateRVCMicParams({ [param]: value } as Partial<typeof micParams>)
+    const paramMap: Record<string, string> = {
+      f0UpKey: 'f0_up_key', indexRate: 'index_rate', filterRadius: 'filter_radius',
+      rmsMixRate: 'rms_mix_rate', protect: 'protect', resampleSr: 'resample_sr',
+      volumeEnvelope: 'volume_envelope', noiseGate: 'noise_gate',
+    }
+    const backendParam = paramMap[param] || param
+    sendMessage({ type: 'rvc_set_params', payload: { [backendParam]: value, source: 'mic' } })
+  }
+
+  const handleTtsParamChange = (param: string, value: number) => {
+    console.log('[Settings] RVC tts param change', param, value)
+    updateRVCTtsParams({ [param]: value } as Partial<typeof ttsParams>)
+    const paramMap: Record<string, string> = {
+      f0UpKey: 'f0_up_key', indexRate: 'index_rate', filterRadius: 'filter_radius',
+      rmsMixRate: 'rms_mix_rate', protect: 'protect', resampleSr: 'resample_sr',
+      volumeEnvelope: 'volume_envelope', noiseGate: 'noise_gate',
+    }
+    const backendParam = paramMap[param] || param
+    sendMessage({ type: 'rvc_set_params', payload: { [backendParam]: value, source: 'tts' } })
+  }
+
+  // Single device toggle — RVC uses one shared model for both mic and TTS
+
+  /** Render a quality slider for a conversion card */
+  const renderSlider = (
+    label: string, value: number, min: number, max: number, step: number,
+    format: (v: number) => string, param: string, onChange: (param: string, value: number) => void
+  ) => (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] text-muted-foreground">{label}</span>
+        <span className="text-[11px] text-muted-foreground">{format(value)}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(param, parseFloat(e.target.value))}
+        className="w-full" disabled={!isModelLoaded} />
+    </div>
+  )
+
   return (
     <div className="p-4 space-y-6">
       <div>
         <h3 className="text-lg font-medium mb-4">Voice Conversion</h3>
         <p className="text-sm text-muted-foreground mb-4">
-          Apply RVC voice models to transform TTS output into a different voice. Load a .pth voice model and adjust conversion parameters.
+          Apply RVC voice models to transform audio into a different voice. Load a .pth voice model and adjust conversion parameters independently for each source.
         </p>
-      </div>
-
-      {/* ─── Conversion Options — Mic first, then TTS ─── */}
-      <div className="space-y-4">
-        <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Conversion Options</h4>
-
-        {/* Real-Time Mic Conversion */}
-        <div className="flex items-center justify-between p-3 bg-secondary/30 rounded-lg">
-          <div className="space-y-0.5">
-            <p className="text-sm font-medium">Real-Time Mic Conversion</p>
-            <p className="text-xs text-muted-foreground">
-              Convert your mic audio through the voice model live
-            </p>
-          </div>
-          <Switch
-            checked={isMicRvcActive}
-            onCheckedChange={handleMicRvcToggle}
-            disabled={!isModelLoaded}
-          />
-        </div>
-
-        {/* Apply to TTS Toggle */}
-        <div className="flex items-center justify-between p-3 bg-secondary/30 rounded-lg">
-          <div className="space-y-0.5">
-            <p className="text-sm font-medium">Apply to TTS Output</p>
-            <p className="text-xs text-muted-foreground">
-              Post-process TTS audio through the voice model
-            </p>
-          </div>
-          <Switch
-            checked={settings.rvc.enabled}
-            onCheckedChange={handleEnableToggle}
-            disabled={!isModelLoaded}
-          />
-        </div>
       </div>
 
       {/* Voice Model */}
@@ -4430,7 +4910,7 @@ function VoiceConversionSettings() {
         <Label>Voice Model</Label>
 
         {/* Warning: RVC enabled but no model */}
-        {settings.rvc.enabled && !isModelLoaded && !isLoading && (
+        {(settings.rvc.enabled || settings.rvc.micRvcEnabled) && !isModelLoaded && !isLoading && (
           <div className="flex items-center gap-2 p-2.5 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
             <AlertCircle className="w-4 h-4 text-yellow-500 shrink-0" />
             <span className="text-sm text-yellow-200">Voice conversion is enabled but no model is loaded</span>
@@ -4470,7 +4950,7 @@ function VoiceConversionSettings() {
         {(settings.rvc.recentModels || []).length > 0 && (
           <div className="space-y-1.5">
             {(settings.rvc.recentModels || []).map((model) => {
-              const isActive = isModelLoaded && settings.rvc.modelPath === model.path
+              const isActive = (isModelLoaded || globalRvcLoaded) && settings.rvc.modelPath === model.path
               const isThisLoading = isLoading && settings.rvc.modelPath === model.path
               return (
                 <div
@@ -4483,17 +4963,25 @@ function VoiceConversionSettings() {
                       : 'bg-secondary/30 border-transparent hover:bg-secondary/50'
                   }`}
                 >
-                  {/* Background fill for loading progress */}
-                  {isThisLoading && loadingProgress > 0 && (
+                  {isThisLoading && (
                     <div
-                      className="absolute inset-0 transition-all duration-300 rounded-lg"
+                      className="absolute inset-0 rounded-lg"
                       style={{
-                        width: `${loadingProgress}%`,
-                        background: 'rgba(40, 180, 80, 0.15)',
+                        width: `${Math.max(loadingProgress, 2)}%`,
+                        background: 'rgba(40, 120, 60, 0.25)',
+                        transition: 'width 0.6s ease-out',
                       }}
                     />
                   )}
-                  {/* Green background for loaded state */}
+                  {isThisLoading && (
+                    <div
+                      className="absolute inset-0 rounded-lg"
+                      style={{
+                        background: 'linear-gradient(90deg, transparent 0%, rgba(80,180,100,0.08) 50%, transparent 100%)',
+                        animation: 'shimmer 2s ease-in-out infinite',
+                      }}
+                    />
+                  )}
                   {isActive && !isThisLoading && (
                     <div className="absolute inset-0 rounded-lg" style={{ background: 'rgba(40, 180, 80, 0.08)' }} />
                   )}
@@ -4504,8 +4992,8 @@ function VoiceConversionSettings() {
                       className="flex-1 text-left min-w-0"
                     >
                       <div className="flex items-center gap-2">
-                        {isThisLoading && <Loader2 className="w-3.5 h-3.5 text-primary animate-spin shrink-0" />}
-                        <span className={`text-sm truncate ${isActive ? 'text-foreground' : 'text-muted-foreground'}`}>{model.name}</span>
+                        {(isThisLoading) && <Loader2 className="w-3.5 h-3.5 text-primary animate-spin shrink-0" />}
+                        <span className={`text-sm truncate ${isActive ? 'text-foreground' : isThisLoading ? 'text-foreground' : 'text-muted-foreground'}`}>{model.name}</span>
                         {model.sizeMb > 0 && (
                           <span className="text-[10px] text-muted-foreground shrink-0">{model.sizeMb} MB</span>
                         )}
@@ -4581,146 +5069,74 @@ function VoiceConversionSettings() {
         )}
       </div>
 
-      {/* Quality Control Sliders */}
-      <div className={`space-y-4 ${!isModelLoaded ? 'opacity-50 pointer-events-none' : ''}`}>
-        <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Quality Controls</h4>
+      {/* ========== DEVICE TOGGLE — shared by both cards ========== */}
+      <div className="flex items-center justify-between p-2 border border-border rounded-lg">
+        <span className="text-xs text-muted-foreground">Processing Device</span>
+        <DeviceToggle device={settings.rvc.rvcDevice} onChange={(d) => handleDeviceChange(d)} />
+      </div>
 
-        {/* Compute Device */}
-        <div className="flex items-center justify-between">
-          <div className="space-y-0.5">
-            <Label>Compute Device</Label>
-            <p className="text-xs text-muted-foreground">GPU provides lower latency. Changing will restart the app.</p>
-          </div>
-          <DeviceToggle
-            device={settings.rvc.rvcDevice}
-            onChange={(d) => handleDeviceChange(d)}
-          />
-        </div>
-
-        {/* Pitch Shift */}
-        <div className="space-y-2">
-          <Label>Pitch Shift: {settings.rvc.f0UpKey} semitones</Label>
-          <div className="flex items-center gap-4">
-            <input
-              type="range"
-              min={-12}
-              max={12}
-              step={1}
-              value={settings.rvc.f0UpKey}
-              onChange={(e) => handleParamChange('f0UpKey', parseInt(e.target.value))}
-              className="flex-1"
+      {/* ========== CONVERSION CARDS — SIDE BY SIDE ========== */}
+      <div className="grid grid-cols-2 gap-3">
+        {/* Real-Time Mic Conversion */}
+        <div className="border border-border rounded-lg overflow-hidden">
+          <div className="flex items-center justify-between p-2 bg-secondary/20">
+            <div className="flex items-center gap-1.5">
+              <div className="w-2 h-2 rounded-sm bg-orange-400" />
+              <span className="text-xs font-medium">Real Time Conversion</span>
+            </div>
+            <Switch
+              checked={isMicRvcActive}
+              onCheckedChange={handleMicRvcToggle}
               disabled={!isModelLoaded}
             />
-            <span className="text-sm w-12 text-right">{settings.rvc.f0UpKey > 0 ? '+' : ''}{settings.rvc.f0UpKey}</span>
           </div>
-          <p className="text-xs text-muted-foreground">Shift pitch up or down. 0 = no change, +12 = one octave up.</p>
+          <div className={`p-2.5 space-y-2.5 border-t border-border ${!isMicRvcActive ? 'opacity-50 pointer-events-none' : ''}`}>
+            {renderSlider('Pitch Shift', micParams.f0UpKey, -12, 12, 1,
+              v => `${v > 0 ? '+' : ''}${v}`, 'f0UpKey', handleMicParamChange)}
+            {renderSlider('Index Rate', micParams.indexRate, 0, 1, 0.05,
+              v => v.toFixed(2), 'indexRate', handleMicParamChange)}
+            {renderSlider('Filter Radius', micParams.filterRadius, 0, 7, 1,
+              v => `${v}`, 'filterRadius', handleMicParamChange)}
+            {renderSlider('Volume Envelope', micParams.volumeEnvelope, 0, 1, 0.05,
+              v => v.toFixed(2), 'volumeEnvelope', handleMicParamChange)}
+            {renderSlider('Protect Consonants', micParams.protect, 0, 0.5, 0.01,
+              v => v.toFixed(2), 'protect', handleMicParamChange)}
+            {renderSlider('RMS Mix Rate', micParams.rmsMixRate, 0, 1, 0.05,
+              v => v.toFixed(2), 'rmsMixRate', handleMicParamChange)}
+            {renderSlider('Noise Gate', micParams.noiseGate, 0, 0.05, 0.001,
+              v => v === 0 ? 'Off' : v.toFixed(3), 'noiseGate', handleMicParamChange)}
+          </div>
         </div>
 
-        {/* Index Rate */}
-        <div className="space-y-2">
-          <Label>Index Rate: {settings.rvc.indexRate.toFixed(2)}</Label>
-          <div className="flex items-center gap-4">
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={settings.rvc.indexRate}
-              onChange={(e) => handleParamChange('indexRate', parseFloat(e.target.value))}
-              className="flex-1"
+        {/* Apply to TTS Output */}
+        <div className="border border-border rounded-lg overflow-hidden">
+          <div className="flex items-center justify-between p-2 bg-secondary/20">
+            <div className="flex items-center gap-1.5">
+              <div className="w-2 h-2 rounded-sm bg-purple-400" />
+              <span className="text-xs font-medium">Apply to TTS Output</span>
+            </div>
+            <Switch
+              checked={settings.rvc.enabled}
+              onCheckedChange={handleEnableToggle}
               disabled={!isModelLoaded}
             />
-            <span className="text-sm w-12 text-right">{settings.rvc.indexRate.toFixed(2)}</span>
           </div>
-          <p className="text-xs text-muted-foreground">FAISS index influence on timbre. Higher = more timbre from the voice model.</p>
-        </div>
-
-        {/* Filter Radius */}
-        <div className="space-y-2">
-          <Label>Filter Radius: {settings.rvc.filterRadius}</Label>
-          <div className="flex items-center gap-4">
-            <input
-              type="range"
-              min={0}
-              max={7}
-              step={1}
-              value={settings.rvc.filterRadius}
-              onChange={(e) => handleParamChange('filterRadius', parseInt(e.target.value))}
-              className="flex-1"
-              disabled={!isModelLoaded}
-            />
-            <span className="text-sm w-12 text-right">{settings.rvc.filterRadius}</span>
+          <div className={`p-2.5 space-y-2.5 border-t border-border ${!settings.rvc.enabled ? 'opacity-50 pointer-events-none' : ''}`}>
+            {renderSlider('Pitch Shift', ttsParams.f0UpKey, -12, 12, 1,
+              v => `${v > 0 ? '+' : ''}${v}`, 'f0UpKey', handleTtsParamChange)}
+            {renderSlider('Index Rate', ttsParams.indexRate, 0, 1, 0.05,
+              v => v.toFixed(2), 'indexRate', handleTtsParamChange)}
+            {renderSlider('Filter Radius', ttsParams.filterRadius, 0, 7, 1,
+              v => `${v}`, 'filterRadius', handleTtsParamChange)}
+            {renderSlider('Volume Envelope', ttsParams.volumeEnvelope, 0, 1, 0.05,
+              v => v.toFixed(2), 'volumeEnvelope', handleTtsParamChange)}
+            {renderSlider('Protect Consonants', ttsParams.protect, 0, 0.5, 0.01,
+              v => v.toFixed(2), 'protect', handleTtsParamChange)}
+            {renderSlider('RMS Mix Rate', ttsParams.rmsMixRate, 0, 1, 0.05,
+              v => v.toFixed(2), 'rmsMixRate', handleTtsParamChange)}
+            {renderSlider('Noise Gate', ttsParams.noiseGate, 0, 0.05, 0.001,
+              v => v === 0 ? 'Off' : v.toFixed(3), 'noiseGate', handleTtsParamChange)}
           </div>
-          <p className="text-xs text-muted-foreground">Pitch smoothing. Higher values reduce pitch jitter.</p>
-        </div>
-
-        {/* Resample Rate */}
-        <div className="space-y-2">
-          <Label>Resample Rate</Label>
-          <Select
-            value={String(settings.rvc.resampleSr)}
-            onValueChange={(value) => handleParamChange('resampleSr', parseInt(value))}
-            options={RESAMPLE_RATE_OPTIONS}
-            disabled={!isModelLoaded}
-          />
-          <p className="text-xs text-muted-foreground">Output audio resample rate. 0 = use model default.</p>
-        </div>
-
-        {/* Volume Envelope */}
-        <div className="space-y-2">
-          <Label>Volume Envelope: {settings.rvc.volumeEnvelope.toFixed(2)}</Label>
-          <div className="flex items-center gap-4">
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={settings.rvc.volumeEnvelope}
-              onChange={(e) => handleParamChange('volumeEnvelope', parseFloat(e.target.value))}
-              className="flex-1"
-              disabled={!isModelLoaded}
-            />
-            <span className="text-sm w-12 text-right">{settings.rvc.volumeEnvelope.toFixed(2)}</span>
-          </div>
-          <p className="text-xs text-muted-foreground">Volume envelope mixing. 0 = use original envelope.</p>
-        </div>
-
-        {/* Protect Consonants */}
-        <div className="space-y-2">
-          <Label>Protect Consonants: {settings.rvc.protect.toFixed(2)}</Label>
-          <div className="flex items-center gap-4">
-            <input
-              type="range"
-              min={0}
-              max={0.5}
-              step={0.01}
-              value={settings.rvc.protect}
-              onChange={(e) => handleParamChange('protect', parseFloat(e.target.value))}
-              className="flex-1"
-              disabled={!isModelLoaded}
-            />
-            <span className="text-sm w-12 text-right">{settings.rvc.protect.toFixed(2)}</span>
-          </div>
-          <p className="text-xs text-muted-foreground">Protect voiceless consonants from artifacts. Higher = more protection.</p>
-        </div>
-
-        {/* RMS Mix Rate */}
-        <div className="space-y-2">
-          <Label>RMS Mix Rate: {settings.rvc.rmsMixRate.toFixed(2)}</Label>
-          <div className="flex items-center gap-4">
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={settings.rvc.rmsMixRate}
-              onChange={(e) => handleParamChange('rmsMixRate', parseFloat(e.target.value))}
-              className="flex-1"
-              disabled={!isModelLoaded}
-            />
-            <span className="text-sm w-12 text-right">{settings.rvc.rmsMixRate.toFixed(2)}</span>
-          </div>
-          <p className="text-xs text-muted-foreground">Loudness matching with original audio. Higher = closer to model loudness.</p>
         </div>
       </div>
 
@@ -4748,18 +5164,51 @@ function VoiceConversionSettings() {
         </p>
       </div>
 
-      {/* Base models are now auto-downloaded during model load - no modal needed */}
+      {/* Performance Settings */}
+      <div className="rounded-lg border border-border p-4 space-y-3">
+        <h4 className="text-sm font-medium">Performance Settings</h4>
+        <p className="text-xs text-muted-foreground">Tune real-time mic conversion latency and quality.</p>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+          {renderSlider('Extra Inference Time', micPerf.contextTime, 0.2, 3.0, 0.1,
+            v => `${v.toFixed(1)}s`, 'contextTime', handlePerfChange)}
+          {renderSlider('Block Time', micPerf.blockTime, 0.2, 2.0, 0.05,
+            v => `${(v * 1000).toFixed(0)}ms`, 'blockTime', handlePerfChange)}
+          {renderSlider('Response Threshold', micPerf.silenceThreshold, 0, 0.05, 0.001,
+            v => v === 0 ? 'Off' : v.toFixed(3), 'silenceThreshold', handlePerfChange)}
+          {renderSlider('Crossfade Length', micPerf.crossfadeMs, 10, 200, 5,
+            v => `${v.toFixed(0)}ms`, 'crossfadeMs', handlePerfChange)}
+        </div>
+      </div>
 
       {/* Info Box */}
       <div className="rounded-lg bg-secondary p-4 text-sm">
         <p className="font-medium mb-2">About Voice Conversion</p>
         <ul className="list-disc list-inside space-y-1 text-muted-foreground text-xs">
-          <li>RVC (Retrieval-based Voice Conversion) transforms TTS audio into a selected voice</li>
+          <li>RVC (Retrieval-based Voice Conversion) transforms audio into a selected voice</li>
           <li>Place .pth model files in the models/rvc/voices folder, or use Browse to select from anywhere</li>
           <li>.index files are optional but improve timbre accuracy when placed alongside the .pth file</li>
-          <li>CPU processing adds 1-5 seconds of latency depending on audio length</li>
+          <li>Each card has independent quality settings for its conversion source</li>
+          <li>Noise Gate removes low-level background noise (0 = off, higher = more aggressive)</li>
+          <li><strong>Extra Inference Time</strong> — more context = better quality, more latency</li>
+          <li><strong>Block Time</strong> — smaller = less delay, more CPU usage</li>
+          <li><strong>Response Threshold</strong> — skip quiet audio below this level</li>
+          <li><strong>Crossfade Length</strong> — smooth transitions between audio blocks</li>
           <li>Use the Unload button to free model memory when done</li>
         </ul>
+      </div>
+
+      <div className="border-t border-border" />
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" onClick={() => {
+          console.log('[Settings] RVC reset defaults')
+          settings.updateRVCMicParams({ ...DEFAULT_RVC_PARAMS })
+          settings.updateRVCTtsParams({ ...DEFAULT_RVC_PARAMS })
+          settings.updateRVCMicPerformance({ blockTime: 0.5, contextTime: 1.0, silenceThreshold: 0.003, crossfadeMs: 40 })
+          settings.updateRVC({ rvcDevice: 'cpu' })
+        }}>
+          <RotateCcw className="w-4 h-4 mr-2" />
+          Reset to Defaults
+        </Button>
       </div>
     </div>
   )

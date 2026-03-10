@@ -17,7 +17,7 @@ import aiohttp
 
 logger = logging.getLogger('stts.voicevox_setup')
 
-DEFAULT_INSTALL_DIR = Path(os.environ.get('APPDATA', Path.home() / '.stts')) / 'STTS' / 'voicevox-engine'
+DEFAULT_INSTALL_DIR = Path(os.environ.get('LOCALAPPDATA', os.environ.get('APPDATA', Path.home() / '.stts'))) / 'STTS' / 'voicevox-engine'
 GITHUB_API_LATEST = 'https://api.github.com/repos/VOICEVOX/voicevox_engine/releases/latest'
 ENGINE_EXECUTABLE = 'run.exe'
 ENGINE_PORT = 50021
@@ -42,7 +42,30 @@ class VoicevoxEngineManager:
         self._on_status = on_status or (lambda *_: None)
         self._process: Optional[subprocess.Popen] = None
         self._cancel_requested = False
+        self._start_cancelled = False
         self._run_exe_path: Optional[Path] = None
+
+        # Migrate from old Roaming location if Local doesn't have it yet
+        self._migrate_from_roaming()
+
+    def _migrate_from_roaming(self):
+        """Move VOICEVOX data from old %APPDATA% (Roaming) to %LOCALAPPDATA% (Local)."""
+        roaming = os.environ.get('APPDATA')
+        local = os.environ.get('LOCALAPPDATA')
+        if not roaming or not local or roaming == local:
+            return
+
+        old_dir = Path(roaming) / 'STTS' / 'voicevox-engine'
+        if not old_dir.exists() or self._install_dir.exists():
+            return  # Nothing to migrate or already migrated
+
+        try:
+            logger.info(f"[voicevox] Migrating from {old_dir} to {self._install_dir}")
+            self._install_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old_dir), str(self._install_dir))
+            logger.info("[voicevox] Migration from Roaming to Local complete")
+        except Exception as e:
+            logger.warning(f"[voicevox] Migration failed ({e}), will use new location for fresh install")
 
     # ── Status ──────────────────────────────────────────────────────────
 
@@ -241,16 +264,30 @@ class VoicevoxEngineManager:
 
         exe = self._find_run_exe()
         if not exe:
-            logger.error("Cannot start VOICEVOX: run.exe not found")
+            logger.error(f"Cannot start VOICEVOX: run.exe not found in {self._install_dir}")
+            # List directory contents for debugging
+            try:
+                if self._install_dir.exists():
+                    contents = list(self._install_dir.iterdir())
+                    logger.error(f"Install dir contents: {[p.name for p in contents[:20]]}")
+                    for child in contents:
+                        if child.is_dir():
+                            sub = list(child.iterdir())[:10]
+                            logger.error(f"  {child.name}/: {[p.name for p in sub]}")
+                else:
+                    logger.error(f"Install dir does not exist: {self._install_dir}")
+            except Exception as e:
+                logger.error(f"Failed to list install dir: {e}")
             return False
 
-        logger.debug(f"Starting VOICEVOX Engine: {exe}")
+        self._start_cancelled = False
+        logger.info(f"Starting VOICEVOX Engine: {exe}")
         try:
             self._process = subprocess.Popen(
                 [str(exe), '--host', '127.0.0.1', '--port', str(ENGINE_PORT)],
                 cwd=str(exe.parent),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
             )
         except Exception as e:
@@ -261,8 +298,21 @@ class VoicevoxEngineManager:
         timeout = aiohttp.ClientTimeout(total=3)
         for i in range(60):
             await asyncio.sleep(1)
-            if self._process.poll() is not None:
-                logger.error("VOICEVOX process exited prematurely")
+            # Check if stop_engine() was called while we were waiting
+            if self._start_cancelled:
+                logger.debug("VOICEVOX start_engine cancelled by stop_engine()")
+                return False
+            proc = self._process  # local ref — stop_engine may set to None
+            if proc is None:
+                logger.debug("VOICEVOX process was cleared (stop called during start)")
+                return False
+            if proc.poll() is not None:
+                # Capture output to understand why it crashed
+                try:
+                    out = proc.stdout.read().decode('utf-8', errors='ignore')[-2000:] if proc.stdout else ''
+                    logger.error(f"VOICEVOX process exited prematurely (code={proc.returncode}). Output:\n{out}")
+                except Exception:
+                    logger.error(f"VOICEVOX process exited prematurely (code={proc.returncode})")
                 self._process = None
                 return False
             try:
@@ -281,6 +331,7 @@ class VoicevoxEngineManager:
 
     def stop_engine(self):
         """Stop the VOICEVOX Engine process (managed or orphaned)."""
+        self._start_cancelled = True  # abort any in-flight start_engine polling
         # Stop managed process
         if self._process and self._process.poll() is None:
             logger.debug("Stopping managed VOICEVOX Engine")

@@ -30,10 +30,55 @@ const messageHandlers = new Set<(message: BackendMessage) => void>()
 // Store connection state change handlers
 const connectionHandlers = new Set<(connected: boolean) => void>()
 
+// Debounced settings backup: saves device settings to disk via backend
+let _settingsBackupTimer: ReturnType<typeof setTimeout> | null = null
+const SETTINGS_BACKUP_DEBOUNCE_MS = 5000  // 5 seconds after last change
+
+function scheduleSettingsBackup() {
+  if (_settingsBackupTimer) clearTimeout(_settingsBackupTimer)
+  _settingsBackupTimer = setTimeout(() => {
+    if (globalWs?.readyState === WebSocket.OPEN) {
+      const backupData = useSettingsStore.getState().getBackupData()
+      console.log('[WS] Sending debounced settings backup to disk')
+      globalWs.send(JSON.stringify({ type: 'save_settings_backup', payload: backupData }))
+    }
+  }, SETTINGS_BACKUP_DEBOUNCE_MS)
+}
+
+// Subscribe to settings store changes at module level (runs once)
+// Only backup device-related fields that matter for reinstall persistence
+useSettingsStore.subscribe(
+  (state, prevState) => {
+    // Check if any backup-worthy fields changed
+    const changed = (
+      state.audio.microphoneDeviceId !== prevState.audio.microphoneDeviceId ||
+      state.audio.speakerCaptureDeviceId !== prevState.audio.speakerCaptureDeviceId ||
+      state.audio.ttsOutputDeviceId !== prevState.audio.ttsOutputDeviceId ||
+      state.outputProfiles !== prevState.outputProfiles ||
+      state.stt.model !== prevState.stt.model ||
+      state.stt.language !== prevState.stt.language ||
+      state.translation.languagePairs !== prevState.translation.languagePairs ||
+      state.translation.provider !== prevState.translation.provider ||
+      state.tts.engine !== prevState.tts.engine ||
+      state.tts.voice !== prevState.tts.voice ||
+      state.tts.voicePerEngine !== prevState.tts.voicePerEngine ||
+      state.rvc.micRvcOutputDeviceId !== prevState.rvc.micRvcOutputDeviceId ||
+      state.menuPosition !== prevState.menuPosition ||
+      state.firstRunComplete !== prevState.firstRunComplete
+    )
+    if (changed) {
+      console.log('[WS] Settings changed — scheduling backup')
+      scheduleSettingsBackup()
+    }
+  }
+)
+
 // Reconnection with exponential backoff
 let reconnectAttempt = 0
+let consecutiveFailures = 0
 const RECONNECT_BASE_MS = 1000
 const RECONNECT_MAX_MS = 30000
+const MAX_CONSECUTIVE_FAILURES = 5
 
 function getReconnectDelay(): number {
   const base = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt), RECONNECT_MAX_MS)
@@ -351,11 +396,19 @@ function handleGlobalMessage(message: BackendMessage) {
       break
 
     case 'rvc_mic_started':
+      console.log('[useBackend] rvc_mic_started received — setting isMicRvcActive=true')
       useChatStore.getState().setMicRvcActive(true)
       break
 
     case 'rvc_mic_stopped':
+      console.log('[useBackend] rvc_mic_stopped received — setting isMicRvcActive=false')
       useChatStore.getState().setMicRvcActive(false)
+      // Clear the 5s stop timeout if it exists
+      if ((window as Record<string, unknown>).__micRvcStopTimeout) {
+        clearTimeout((window as Record<string, unknown>).__micRvcStopTimeout as number)
+        ;(window as Record<string, unknown>).__micRvcStopTimeout = undefined
+        console.log('[useBackend] Cleared mic RVC stop timeout — backend confirmed stop')
+      }
       break
 
     case 'rvc_available_devices': {
@@ -367,7 +420,13 @@ function handleGlobalMessage(message: BackendMessage) {
     }
 
     case 'rvc_mic_error':
+      console.log('[useBackend] rvc_mic_error received:', payload.error)
       useChatStore.getState().setMicRvcActive(false)
+      // Clear the 5s stop timeout if it exists
+      if ((window as Record<string, unknown>).__micRvcStopTimeout) {
+        clearTimeout((window as Record<string, unknown>).__micRvcStopTimeout as number)
+        ;(window as Record<string, unknown>).__micRvcStopTimeout = undefined
+      }
       useNotificationStore.getState().addToast(
         `Mic RVC error: ${(payload.error as string) || 'Unknown error'}`,
         'error'
@@ -474,6 +533,7 @@ function handleGlobalMessage(message: BackendMessage) {
       break
 
     case 'feature_uninstall_result':
+      console.log('[useBackend] feature_uninstall_result:', JSON.stringify(payload))
       useFeaturesStore.getState().setUninstallResult({
         success: payload.success as boolean,
         feature: payload.feature as string,
@@ -486,6 +546,56 @@ function handleGlobalMessage(message: BackendMessage) {
       useFeaturesStore.getState().setVoicevoxInstalled(payload.installed as boolean)
       break
 
+    case 'settings_backup_loaded': {
+      const found = payload.found as boolean
+      console.log('[useBackend] settings_backup_loaded: found=', found)
+      if (found && payload.settings) {
+        const backupSettings = payload.settings as Record<string, unknown>
+        console.log('[useBackend] Restoring settings from disk backup, keys=', Object.keys(backupSettings))
+        useSettingsStore.getState().restoreFromBackup(backupSettings)
+        useNotificationStore.getState().addToast(
+          'Settings restored from previous installation',
+          'info'
+        )
+        // Re-send updated settings to backend after restore
+        const settings = useSettingsStore.getState()
+        if (globalWs?.readyState === WebSocket.OPEN) {
+          console.log('[useBackend] Re-syncing restored settings to backend')
+          globalWs.send(JSON.stringify({
+            type: 'update_settings',
+            payload: {
+              stt: { model: settings.stt.model, language: settings.stt.language, device: settings.stt.device },
+              tts: { engine: settings.tts.engine, voice: settings.tts.voice, enabled: settings.tts.enabled, device: settings.tts.device },
+              translation: {
+                enabled: settings.translation.enabled,
+                provider: settings.translation.provider,
+                device: settings.translation.device,
+                language_pairs: settings.translation.languagePairs.map((p) => ({ source: p.sourceLanguage, target: p.targetLanguage })),
+                active_pair_index: settings.translation.activePairIndex,
+              },
+              ai: { enabled: settings.ai.enabled, keyword: settings.ai.keyword, provider: settings.ai.provider, emoji_mode: settings.ai.emojiMode, device: settings.ai.device },
+              audio: {
+                input_device: settings.audio.microphoneDeviceId ? parseInt(settings.audio.microphoneDeviceId) : null,
+                speaker_capture_device: settings.audio.speakerCaptureDeviceId ? parseInt(settings.audio.speakerCaptureDeviceId) : null,
+                vad_enabled: settings.audio.enableVAD,
+                vad_sensitivity: settings.audio.vadSensitivity,
+                enableNoiseSuppression: settings.audio.enableNoiseSuppression,
+              },
+              output_profiles: settings.outputProfiles,
+            }
+          }))
+        }
+      }
+      break
+    }
+
+    case 'settings_backup_saved':
+      console.log('[useBackend] settings_backup_saved: success=', payload.success)
+      if (!payload.success) {
+        console.warn('[useBackend] Failed to save settings backup:', payload.error)
+      }
+      break
+
     default:
       // Other messages are handled by individual hook instances
       break
@@ -496,6 +606,11 @@ function handleGlobalMessage(message: BackendMessage) {
 function setGlobalConnected(connected: boolean) {
   globalConnected = connected
   connectionHandlers.forEach(handler => handler(connected))
+}
+
+/** Check if WS is currently connected (for use outside React components) */
+export function isWsConnected(): boolean {
+  return globalWs?.readyState === WebSocket.OPEN
 }
 
 export function useBackend() {
@@ -539,10 +654,29 @@ export function useBackend() {
       return
     }
 
+    // Reset stale state: WS exists but is CLOSED (e.g. after page refresh)
+    if (globalWs && globalWs.readyState === WebSocket.CLOSED) {
+      console.log('[WS] Clearing stale CLOSED WebSocket')
+      globalWs = null
+      globalConnecting = false
+      globalConnected = false
+    }
+
     // Reset stale connecting state (can happen after hot reload)
     if (globalConnecting && (!globalWs || globalWs.readyState === WebSocket.CLOSED)) {
+      console.log('[WS] Clearing stale connecting state')
       globalConnecting = false
       globalWs = null
+    }
+
+    // Max-retry watchdog: after N consecutive failures, hard-reset everything
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      console.log(`[WS] Watchdog: ${consecutiveFailures} consecutive failures, resetting all module-level state`)
+      globalWs = null
+      globalConnecting = false
+      globalConnected = false
+      consecutiveFailures = 0
+      setReconnectAttempt(0)
     }
 
     if (globalConnecting) {
@@ -556,7 +690,9 @@ export function useBackend() {
       globalWs = ws
 
       ws.onopen = () => {
+        console.log('[WS] Connected successfully')
         globalConnecting = false
+        consecutiveFailures = 0  // Reset failure counter on success
         setGlobalConnected(true)
         setReconnectAttempt(0)  // Reset backoff on successful connection
 
@@ -566,6 +702,17 @@ export function useBackend() {
         ws.send(JSON.stringify({ type: 'get_features_status' }))
         // Check VOICEVOX install status (fast local check, no network/icon fetch)
         ws.send(JSON.stringify({ type: 'voicevox_check_install' }))
+
+        // Check if settings need restore from disk backup (e.g. after reinstall)
+        const settingsStoreForBackup = useSettingsStore.getState()
+        if (settingsStoreForBackup.needsRestore()) {
+          console.log('[WS] Settings look like defaults — requesting backup from disk')
+          ws.send(JSON.stringify({ type: 'load_settings_backup' }))
+        } else {
+          // Settings are good — save a fresh backup to disk
+          console.log('[WS] Settings intact — saving backup to disk')
+          ws.send(JSON.stringify({ type: 'save_settings_backup', payload: settingsStoreForBackup.getBackupData() }))
+        }
 
         // Resync frontend settings to backend (critical after backend restart)
         // Must use nested keys matching backend's settings dict structure
@@ -618,6 +765,14 @@ export function useBackend() {
             output_profiles: settings.outputProfiles,
           }
         }))
+        // Resync LLM models directory if user has set one
+        if (settings.ai.modelsDirectory) {
+          console.log('[WS] Resyncing LLM models directory:', settings.ai.modelsDirectory)
+          ws.send(JSON.stringify({
+            type: 'set_models_directory',
+            payload: { path: settings.ai.modelsDirectory }
+          }))
+        }
         // Also resync RVC device after restart
         ws.send(JSON.stringify({
           type: 'rvc_set_device',
@@ -629,9 +784,10 @@ export function useBackend() {
         globalConnecting = false
         globalWs = null
         setGlobalConnected(false)
+        consecutiveFailures++
         // 1001 = "going away" (normal close, e.g. page unload) — don't log as error
         if (event.code !== 1001) {
-          console.debug('WebSocket closed:', event.code, event.reason)
+          console.log('[WS] Closed:', event.code, event.reason, `(consecutive failures: ${consecutiveFailures})`)
         }
         // Reset runtime state that depends on backend
         useChatStore.getState().setMicRvcActive(false)
@@ -643,6 +799,7 @@ export function useBackend() {
 
         const delay = getReconnectDelay()
         setReconnectAttempt(reconnectAttempt + 1)
+        console.log(`[WS] Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempt + 1})`)
         reconnectTimeoutRef.current = window.setTimeout(() => {
           connect()
         }, delay)
@@ -719,7 +876,7 @@ export function useBackend() {
               'rvc_models_list', 'rvc_model_loading', 'rvc_model_loaded', 'rvc_model_error',
               'rvc_status', 'rvc_unloaded', 'rvc_params_updated', 'rvc_conversion_failed',
               'rvc_download_progress', 'rvc_base_models_needed',
-              'llm_unloaded',
+              'llm_unloaded', 'stt_unloaded', 'translation_unloaded',
               'rvc_test_voice_ready', 'rvc_test_voice_error', 'rvc_model_browsed',
               'rvc_mic_started', 'rvc_mic_stopped', 'rvc_mic_error', 'rvc_available_devices',
               'ocr_result', 'ocr_status', 'ocr_error',
@@ -727,7 +884,8 @@ export function useBackend() {
               'vrchat_sent', 'vrchat_status', 'tts_started', 'tts_finished',
               'tts_voices', 'tts_output_devices', 'audio_devices', 'loopback_test_result',
               'features_status', 'feature_install_progress', 'feature_install_result', 'feature_uninstall_result',
-              'test_osc_result'].includes(type)) {
+              'test_osc_result',
+              'settings_backup_saved', 'settings_backup_loaded'].includes(type)) {
           console.warn('Unknown message type:', type)
         }
         break
@@ -748,7 +906,10 @@ export function useBackend() {
   }, [send])
 
   const stopListening = useCallback(() => {
+    console.log('[useBackend] stopListening — sending stop_listening + optimistic setListening(false)')
     send({ type: 'stop_listening' })
+    // Optimistic UI update — don't wait for backend confirmation
+    useChatStore.getState().setListening(false)
   }, [send])
 
   const testMicrophone = useCallback((deviceId?: number) => {
@@ -848,6 +1009,16 @@ export function useBackend() {
     send({ type: 'unload_llm' })
   }, [send])
 
+  const unloadSTT = useCallback(() => {
+    console.log('[WS] Sending unload_stt')
+    send({ type: 'unload_stt' })
+  }, [send])
+
+  const unloadTranslation = useCallback(() => {
+    console.log('[WS] Sending unload_translation')
+    send({ type: 'unload_translation' })
+  }, [send])
+
   const getLLMStatus = useCallback(() => {
     send({ type: 'get_llm_status' })
   }, [send])
@@ -859,6 +1030,24 @@ export function useBackend() {
       messageHandlers.delete(handleMessage)
     }
   }, [handleMessage])
+
+  // Clean up WebSocket on page unload to prevent stale state on refresh
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      console.log('[WS] Page unloading, closing WebSocket cleanly')
+      if (globalWs && globalWs.readyState === WebSocket.OPEN) {
+        globalWs.close(1001, 'page unload')
+      }
+      globalWs = null
+      globalConnecting = false
+      globalConnected = false
+      consecutiveFailures = 0
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [])
 
   useEffect(() => {
     connect()
@@ -906,5 +1095,7 @@ export function useBackend() {
     browseLLMModel,
     getLLMStatus,
     unloadLLM,
+    unloadSTT,
+    unloadTranslation,
   }
 }

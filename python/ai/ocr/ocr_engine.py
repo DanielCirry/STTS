@@ -86,7 +86,61 @@ class OCREngine:
             logger.info(f"[ocr] Loading EasyOCR reader: languages={languages}, device={device}")
 
             def _load():
-                import easyocr
+                import sys as _sys
+                import traceback as _tb
+                from pathlib import Path as _Path
+
+                # Log sys.path for debugging import issues
+                logger.info(f"[ocr] sys.path at easyocr import time ({len(_sys.path)} entries):")
+                for i, p in enumerate(_sys.path):
+                    logger.info(f"[ocr]   sys.path[{i}] = {p}")
+
+                try:
+                    import easyocr
+                    logger.info(f"[ocr] easyocr imported successfully from {getattr(easyocr, '__file__', 'unknown')}")
+                except ModuleNotFoundError:
+                    logger.warning("[ocr] easyocr not found on initial import, attempting to add venv site-packages")
+                    # Try to add venv site-packages if not already present
+                    if getattr(_sys, 'frozen', False):
+                        venv_site = _Path(_sys.executable).parent / 'venv' / 'Lib' / 'site-packages'
+                        logger.info(f"[ocr] Checking venv site-packages: {venv_site} (exists={venv_site.exists()})")
+                        if venv_site.exists():
+                            venv_str = str(venv_site)
+                            if venv_str not in _sys.path:
+                                _sys.path.insert(0, venv_str)
+                                logger.info(f"[ocr] Added {venv_str} to sys.path, retrying import")
+                            else:
+                                logger.warning(f"[ocr] {venv_str} already in sys.path but import still failed")
+                            # Also check if easyocr directory actually exists in venv
+                            easyocr_dir = venv_site / 'easyocr'
+                            easyocr_egg = list(venv_site.glob('easyocr*'))
+                            logger.info(f"[ocr] easyocr dir exists: {easyocr_dir.exists()}, easyocr files: {[str(e.name) for e in easyocr_egg]}")
+                        else:
+                            logger.error(f"[ocr] venv site-packages does not exist at {venv_site}")
+                    # Check if easyocr package files actually exist
+                    if getattr(_sys, 'frozen', False):
+                        venv_site = _Path(_sys.executable).parent / 'venv' / 'Lib' / 'site-packages'
+                        easyocr_dir = venv_site / 'easyocr'
+                        if not easyocr_dir.exists():
+                            logger.error(f"[ocr] easyocr package NOT installed in venv at {easyocr_dir}")
+                            logger.error("[ocr] User needs to install OCR feature from Install Features page")
+                            raise ModuleNotFoundError("easyocr not installed in venv — install from Features page")
+                        # easyocr exists in venv, try importing deps first to diagnose
+                        for dep in ['cv2', 'PIL', 'numpy', 'torch']:
+                            try:
+                                __import__(dep)
+                                logger.info(f"[ocr] Dependency '{dep}' importable")
+                            except Exception as dep_err:
+                                logger.error(f"[ocr] Dependency '{dep}' FAILED to import: {dep_err}")
+                    # Retry import
+                    try:
+                        import easyocr
+                        logger.info(f"[ocr] easyocr imported on retry from {getattr(easyocr, '__file__', 'unknown')}")
+                    except Exception as retry_err:
+                        logger.error(f"[ocr] easyocr retry import also failed: {retry_err}")
+                        logger.error(f"[ocr] Full traceback:\n{_tb.format_exc()}")
+                        raise
+
                 gpu = device == 'gpu' or device == 'cuda'
                 return easyocr.Reader(languages, gpu=gpu)
 
@@ -101,7 +155,9 @@ class OCREngine:
             return True
 
         except Exception as e:
+            import traceback
             logger.error(f"[ocr] Failed to load EasyOCR: {e}")
+            logger.error(f"[ocr] Full traceback:\n{traceback.format_exc()}")
             self._loaded = False
             self._loading = False
             self._notify_status()

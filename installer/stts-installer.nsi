@@ -130,8 +130,22 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\${APPNAME}\Uninstall.lnk"
     RMDir "$SMPROGRAMS\${APPNAME}"
 
-    ; Remove user data (models, VOICEVOX, cache, logs) in %APPDATA%\STTS
-    RMDir /r "$APPDATA\STTS"
+    ; Remove user data (models, VOICEVOX, cache, logs) in %LOCALAPPDATA%\STTS
+    ; Note: $INSTDIR is already $LOCALAPPDATA\STTS so RMDir /r above covers most of it
+    ; Clean up any remaining data subdirectories
+    RMDir /r "$LOCALAPPDATA\STTS\logs"
+    RMDir /r "$LOCALAPPDATA\STTS\models"
+    RMDir /r "$LOCALAPPDATA\STTS\cache"
+    RMDir /r "$LOCALAPPDATA\STTS\voicevox-engine"
+    Delete "$LOCALAPPDATA\STTS\settings-backup.json"
+
+    ; Also clean legacy Roaming data from older installs
+    RMDir /r "$APPDATA\STTS\logs"
+    RMDir /r "$APPDATA\STTS\models"
+    RMDir /r "$APPDATA\STTS\cache"
+    RMDir /r "$APPDATA\STTS\voicevox"
+    Delete "$APPDATA\STTS\*.log"
+    RMDir "$APPDATA\STTS"
 
     ; Remove registry
     DeleteRegKey HKCU "${UNINSTKEY}"

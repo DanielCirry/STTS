@@ -22,8 +22,8 @@ from ai.tts.base import TTSResult
 
 logger = logging.getLogger('stts.tts.rvc_postprocess')
 
-# Default directories under %APPDATA%\STTS\models\rvc
-_APPDATA = Path(os.environ.get('APPDATA', Path.home() / '.stts'))
+# Default directories under %LOCALAPPDATA%\STTS\models\rvc
+_APPDATA = Path(os.environ.get('LOCALAPPDATA', os.environ.get('APPDATA', Path.home() / '.stts')))
 DEFAULT_MODELS_DIR = str(_APPDATA / 'STTS' / 'models' / 'rvc' / 'voices')
 DEFAULT_PRETRAINED_DIR = str(_APPDATA / 'STTS' / 'models' / 'rvc' / 'pretrained')
 

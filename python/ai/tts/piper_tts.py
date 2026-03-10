@@ -92,9 +92,9 @@ class PiperTTSEngine:
 
         # Model paths
         if models_dir is None:
-            # Default to %APPDATA%/STTS/models/piper
+            # Default to %LOCALAPPDATA%/STTS/models/piper
             import os
-            appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+            appdata = os.environ.get('LOCALAPPDATA', os.environ.get('APPDATA', os.path.expanduser('~')))
             models_dir = Path(appdata) / 'STTS' / 'models' / 'piper'
 
         self._models_dir = models_dir

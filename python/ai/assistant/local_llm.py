@@ -68,7 +68,7 @@ class LocalLLMProvider(AIProvider):
             if docs.exists():
                 models_dir = docs / 'STTS' / 'Models'
             else:
-                appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+                appdata = os.environ.get('LOCALAPPDATA', os.environ.get('APPDATA', os.path.expanduser('~')))
                 models_dir = Path(appdata) / 'STTS' / 'models' / 'llm'
 
         self._models_dir = models_dir

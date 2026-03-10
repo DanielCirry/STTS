@@ -152,18 +152,31 @@ class VROverlay:
         try:
             import openvr
 
-            if not openvr.isRuntimeInstalled():
-                logger.warning("SteamVR runtime not installed")
-                return False
+            # Note: isRuntimeInstalled() and isHmdPresent() rely on the
+            # openvrpaths.vrpath file which may not exist on all systems.
+            # Instead, try openvr.init() directly — if SteamVR is running
+            # it will succeed regardless of the path registry.
+            runtime_installed = openvr.isRuntimeInstalled()
+            hmd_present = openvr.isHmdPresent()
+            logger.info(f"[vr_overlay] OpenVR check: runtime_installed={runtime_installed}, hmd_present={hmd_present}")
 
-            if not openvr.isHmdPresent():
-                logger.debug("No VR headset detected")
+            # Try to initialize even if checks fail — SteamVR may still be reachable
+            try:
+                self._openvr = openvr.init(openvr.VRApplication_Overlay)
+            except Exception as init_err:
+                err_str = str(init_err)
+                if 'PathRegistryNotFound' in err_str:
+                    logger.warning("[vr_overlay] OpenVR path registry not found — SteamVR may not be installed")
+                elif 'NotInstalled' in err_str:
+                    logger.warning("[vr_overlay] SteamVR not installed")
+                elif 'HmdNotFound' in err_str:
+                    logger.warning("[vr_overlay] SteamVR running but no headset detected")
+                else:
+                    logger.warning(f"[vr_overlay] OpenVR init failed: {init_err}")
                 return False
-
-            self._openvr = openvr.init(openvr.VRApplication_Overlay)
 
             if self._openvr is None:
-                logger.error("Failed to initialize OpenVR")
+                logger.error("[vr_overlay] Failed to initialize OpenVR (openvr.init returned None)")
                 return False
 
             overlay = openvr.IVROverlay()
@@ -820,11 +833,24 @@ class VROverlay:
 
     @property
     def is_available(self) -> bool:
+        """Check if VR overlay can potentially work.
+
+        Note: isRuntimeInstalled/isHmdPresent rely on openvrpaths.vrpath
+        which may not exist. If openvr is importable, consider it available
+        and let initialize() handle actual connection.
+        """
         if not PIL_AVAILABLE:
             return False
+        if self._is_initialized:
+            return True
         try:
             import openvr
-            return openvr.isRuntimeInstalled() and openvr.isHmdPresent()
+            # If the path registry works, use it
+            if openvr.isRuntimeInstalled():
+                return True
+            # Path registry may be missing but SteamVR could still work — report available
+            # so user can attempt to enable it
+            return True
         except ImportError:
             return False
         except:
@@ -832,9 +858,14 @@ class VROverlay:
 
     @property
     def is_runtime_installed(self) -> bool:
+        if self._is_initialized:
+            return True
         try:
             import openvr
-            return openvr.isRuntimeInstalled()
+            result = openvr.isRuntimeInstalled()
+            # If path registry is missing, still return True if openvr is importable
+            # (SteamVR may work via direct init)
+            return True if not result else result
         except ImportError:
             return False
         except:
@@ -842,6 +873,8 @@ class VROverlay:
 
     @property
     def is_hmd_present(self) -> bool:
+        if self._is_initialized:
+            return True
         try:
             import openvr
             return openvr.isHmdPresent()
